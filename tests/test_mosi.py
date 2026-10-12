@@ -12,6 +12,7 @@ def _settings(**overrides):
     base = dict(
         app_mode="live",
         tts_provider="mosi",
+        mosi_api_key="",
         moss_api_key="test-key",
         moss_base_url="https://api.mosi.cn",
         moss_model="moss-ttsd-1.0",
@@ -40,6 +41,7 @@ def test_dialogue_request_matches_mosi_docs(tmp_path):
             captured["body"] = json.loads(request.content.decode())
             return httpx.Response(200, json={"id": "job1", "status": "SUCCESS", "url": "https://cdn.example/out.wav"})
         if request.url.host == "cdn.example":
+            captured["cdn_authorization"] = request.headers.get("authorization")
             return httpx.Response(200, content=wav, headers={"content-type": "audio/wav"})
         raise AssertionError(request.url)
 
@@ -59,6 +61,7 @@ def test_dialogue_request_matches_mosi_docs(tmp_path):
     assert speaker["voice_id"] == "voice-lin"
     assert body["segments"] == [{"speaker": speaker["id"], "text": "不要再往北走了。"}]
     assert dest.read_bytes().startswith(b"RIFF")
+    assert captured["cdn_authorization"] is None
 
 
 def test_async_task_is_polled(tmp_path):

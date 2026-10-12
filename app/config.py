@@ -22,7 +22,10 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4o-mini"
+    # 留空时按提供方取默认：deepseek 为 deepseek-flash，其余为 gpt-4o-mini。
+    llm_model: str = ""
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
 
     image_api_key: str = ""
     image_base_url: str = "https://api.aicoming.top/v1"
@@ -67,6 +70,25 @@ class Settings(BaseSettings):
 
     def resolved_llm(self) -> str:
         return self._resolve(self.llm_provider, "openai")
+
+    def resolved_llm_model(self) -> str:
+        explicit = (self.llm_model or "").strip()
+        if explicit:
+            return explicit
+        if self.resolved_llm() == "deepseek":
+            return "deepseek-flash"
+        return "gpt-4o-mini"
+
+    def resolved_llm_key(self) -> str:
+        provider = self.resolved_llm()
+        if provider == "deepseek":
+            return self.deepseek_api_key.strip()
+        if provider == "openai":
+            return self.openai_api_key.strip()
+        return ""
+
+    def resolved_deepseek_base_url(self) -> str:
+        return (self.deepseek_base_url or "https://api.deepseek.com").rstrip("/")
 
     def resolved_tts(self) -> str:
         return self._resolve(self.tts_provider, "mosi")

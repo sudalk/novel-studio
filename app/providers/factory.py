@@ -3,7 +3,7 @@ import httpx
 from app.config import Settings
 from app.providers.errors import ProviderError
 from app.providers.image import MockImageProvider, OpenAIImageProvider
-from app.providers.llm import MockLLM, OpenAILLM
+from app.providers.llm import DeepSeekLLM, MockLLM, OpenAILLM
 from app.providers.tts import MockTTS, MosiTTSProvider
 
 
@@ -13,6 +13,8 @@ def build_llm(settings: Settings, client: httpx.Client | None = None):
         return MockLLM()
     if name == "openai":
         return OpenAILLM(settings, client=client)
+    if name == "deepseek":
+        return DeepSeekLLM(settings, client=client)
     raise ProviderError(f"未知的文本模型提供方：{name}")
 
 

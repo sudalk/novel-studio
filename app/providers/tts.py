@@ -260,7 +260,9 @@ class MosiTTSProvider:
         raise ProviderError(f"无法解析 MOSI 响应：{str(data)[:300]}")
 
     def _download(self, url: str) -> bytes:
-        response = self._request("GET", url, headers=self._headers(False))
+        # 结果经常在对象存储的签名地址上。把 MOSI 的 Authorization 带过去会被拒绝。
+        headers = self._headers(False) if _same_host(url, self._base()) else {}
+        response = self._request("GET", url, headers=headers)
         self._raise(response)
         if not response.content:
             raise ProviderError("MOSI 音频地址没有内容")
@@ -292,6 +294,13 @@ class MosiTTSProvider:
                 delay = 2.0
             self._sleep(delay)
         raise ProviderError("MOSI 任务超时")
+
+
+def _same_host(url: str, base: str) -> bool:
+    try:
+        return (httpx.URL(url).host or "").lower() == (httpx.URL(base).host or "").lower()
+    except Exception:
+        return False
 
 
 def _retry_after(response: httpx.Response) -> float | None:

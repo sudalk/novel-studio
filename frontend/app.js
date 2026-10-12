@@ -124,6 +124,7 @@ function banner() {
   ];
   const missing = [];
   if (state.config.llm_provider === "openai" && !state.config.llm_configured) missing.push("OPENAI_API_KEY");
+  if (state.config.llm_provider === "deepseek" && !state.config.llm_configured) missing.push("DEEPSEEK_API_KEY");
   if (state.config.tts_provider === "mosi" && !state.config.moss_configured) missing.push("MOSI_API_KEY");
   if (state.config.image_provider === "openai" && !state.config.image_configured) missing.push("图像密钥");
   const warn = missing.length ? `还缺：${missing.join("、")}` : "密钥已配置";

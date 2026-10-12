@@ -25,7 +25,7 @@ FastAPI（app/main.py，app/api/）
     ├── SQLite：作品、角色、分集、台词、场景、任务
     ├── 本地文件：data/novels/... 下的 wav、png、srt、mp4
     └── 提供方
-         ├── 文本  mock | openai（兼容 Chat Completions）
+         ├── 文本  mock | openai | deepseek（都是 Chat Completions）
          ├── 语音  mock | mosi（POST /v1/audio/speech/speakers）
          └── 图像  mock | openai（兼容 images/generations）
 ```
@@ -90,15 +90,17 @@ pytest
 | 变量 | 作用 |
 | --- | --- |
 | `APP_MODE` | `mock`（默认）或 `live`。mock 不访问外部 API。 |
-| `LLM_PROVIDER` | 空则 mock 用 `mock`、live 用 `openai`。也可填 `mock` 或 `openai`。 |
+| `LLM_PROVIDER` | 空则 mock 用 `mock`、live 用 `openai`。也可填 `mock`、`openai` 或 `deepseek`。 |
 | `TTS_PROVIDER` | 空则 mock 用 `mock`、live 用 `mosi`。 |
 | `IMAGE_PROVIDER` | 空则 mock 用 `mock`、live 用 `openai`。 |
 | `DATABASE_URL` | 默认 `sqlite:///./data/studio.db` |
 | `DATA_DIR` | 生成文件目录，默认 `./data` |
 | `JOBS_INLINE` | `true` 时接口等任务结束再返回。日常保持 `false`。 |
-| `OPENAI_API_KEY` | 文本模型密钥。OpenAI 兼容接口。 |
+| `OPENAI_API_KEY` | OpenAI 文本模型密钥。 |
 | `OPENAI_BASE_URL` | 默认 `https://api.openai.com/v1` |
-| `LLM_MODEL` | 默认 `gpt-4o-mini` |
+| `LLM_MODEL` | 留空时 deepseek 用 `deepseek-flash`，openai 用 `gpt-4o-mini`。 |
+| `DEEPSEEK_API_KEY` | DeepSeek 密钥。只放在环境变量里，不要提交。 |
+| `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com`。 |
 | `IMAGE_API_KEY` | 图像密钥。只放在环境变量里，不要提交。 |
 | `IMAGE_BASE_URL` | 默认 `https://api.aicoming.top/v1`，OpenAI 兼容的 images/generations。 |
 | `IMAGE_MODEL` | 默认 `gpt-image-2.5-flare`。备选 `gpt-image-2-2k`。 |
@@ -117,7 +119,7 @@ pytest
 
 真实模式至少需要：
 
-- 拆剧本和分镜：`OPENAI_API_KEY`（或兼容服务的密钥和 `OPENAI_BASE_URL`）
+- 拆剧本和分镜：`LLM_PROVIDER=deepseek` 加 `DEEPSEEK_API_KEY`，或 `LLM_PROVIDER=openai` 加 `OPENAI_API_KEY`。DeepSeek 默认模型是 `deepseek-flash`（DeepSeek-V4.1-Flash，见 [模型与价格](https://api-docs.deepseek.com/quick_start/pricing)）。拆剧本时关闭思考模式，只要 JSON。
 - 配音：`MOSI_API_KEY`。音色从 `GET /v1/audio/voices` 拉取，旁白和每个角色各选一把，也可以粘贴 `voice_id`。
 - 插画：`IMAGE_API_KEY`，接口是 `IMAGE_BASE_URL` 上的 images/generations。
 
