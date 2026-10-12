@@ -251,6 +251,9 @@ img, video, audio { max-width: 100%; }
 
 .style-card { margin-top: 22px; }
 .style-card textarea { min-height: 96px; margin-top: 12px; }
+.cap-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.cap-row label { font-size: 13px; color: var(--text-2); }
+.cap-row input { width: 120px; }
 .split {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
@@ -493,13 +496,13 @@ body[data-view="episode"] .jobbar { margin: 12px 20px 0; }
 .cut audio { width: 100%; margin-top: 10px; }
 .scene {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 78px minmax(0, 1fr);
   gap: 10px;
   margin: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid #f3f3f3;
 }
-.scene img { width: 112px; height: 72px; object-fit: cover; border-radius: 10px; background: var(--muted); }
+.scene img { width: 78px; height: 140px; object-fit: cover; border-radius: 10px; background: var(--muted); }
 .scene p { font-size: 13px; color: var(--ink); }
 .scene .prompt { margin-top: 4px; color: var(--text-3); font-size: 12px; }
 .source {

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import logging
+import threading
 import time
 
 import httpx
@@ -64,16 +65,32 @@ class ImageRequestError(ProviderError):
 
 
 class OpenAIImageProvider:
-    """OpenAI 兼容的 images/generations，默认打到图像中转。"""
+    """OpenAI 兼容的 images/generations。按模型列表轮换，失败就换下一个。"""
 
     name = "openai"
+    _cursor = 0
+    _lock = threading.Lock()
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None, sleep=time.sleep):
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
         self.settings = settings
-        self._sleep = sleep
-        timeout = httpx.Timeout(settings.image_timeout_sec, connect=30.0)
+        timeout = httpx.Timeout(settings.image_timeout_sec, connect=20.0)
         self._client = client or httpx.Client(timeout=timeout, follow_redirects=True)
         self._owns_client = client is None
+        self.last_model = ""
+        self.last_elapsed_sec = 0.0
+        self.last_attempts: list[dict] = []
+
+    @classmethod
+    def reset_rotation(cls) -> None:
+        with cls._lock:
+            cls._cursor = 0
+
+    @classmethod
+    def _take_turn(cls, count: int) -> int:
+        with cls._lock:
+            start = cls._cursor % count
+            cls._cursor = (start + 1) % count
+            return start
 
     def close(self) -> None:
         if self._owns_client:
@@ -81,25 +98,40 @@ class OpenAIImageProvider:
 
     def generate(self, prompt: str, dest, width: int, height: int) -> str | None:
         del width, height
-        attempts = max(1, int(self.settings.image_max_attempts))
-        last: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return self._once(prompt, dest)
-            except ImageRequestError as exc:
-                last = exc
-                if attempt >= attempts:
-                    break
-                wait = self.settings.image_retry_wait_sec
-                logger.warning("图像第 %s/%s 次失败，%.0f 秒后重试：%s", attempt, attempts, wait, exc)
-                if wait > 0:
-                    self._sleep(wait)
-        raise ProviderError(f"图像生成失败，已试 {attempts} 次：{last}") from last
-
-    def _once(self, prompt: str, dest) -> str | None:
+        models = self.settings.resolved_image_models()
+        if not models:
+            raise ProviderError("没有可用的图像模型")
         key = self.settings.image_api_key.strip()
         if not key:
             raise ProviderError("未配置 IMAGE_API_KEY")
+        start = self._take_turn(len(models))
+        order = [models[(start + offset) % len(models)] for offset in range(len(models))]
+        started = time.perf_counter()
+        self.last_attempts = []
+        last: Exception | None = None
+        for model in order:
+            attempt_started = time.perf_counter()
+            try:
+                source = self._once(prompt, dest, model, key)
+            except ImageRequestError as exc:
+                elapsed = time.perf_counter() - attempt_started
+                self.last_attempts.append(
+                    {"model": model, "ok": False, "seconds": round(elapsed, 2), "error": str(exc)}
+                )
+                last = exc
+                logger.warning("图像模型 %s 失败，改试下一个：%s", model, exc)
+                continue
+            elapsed = time.perf_counter() - attempt_started
+            self.last_model = model
+            self.last_elapsed_sec = time.perf_counter() - started
+            self.last_attempts.append({"model": model, "ok": True, "seconds": round(elapsed, 2), "error": ""})
+            logger.info("图像由 %s 生成，耗时 %.1f 秒", model, self.last_elapsed_sec)
+            return source
+        self.last_elapsed_sec = time.perf_counter() - started
+        tried = "、".join(order)
+        raise ProviderError(f"图像生成失败，已试过 {tried}：{last}") from last
+
+    def _once(self, prompt: str, dest, model: str, key: str) -> str | None:
         try:
             size = self.settings.resolved_image_size()
         except ValueError as exc:
@@ -107,7 +139,7 @@ class OpenAIImageProvider:
         url = self.settings.resolved_image_base_url() + "/images/generations"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": self.settings.resolved_image_model(),
+            "model": model,
             "prompt": prompt,
             "size": size,
             "response_format": "b64_json",
@@ -116,10 +148,8 @@ class OpenAIImageProvider:
         if response.status_code == 400 and "response_format" in payload:
             payload.pop("response_format")
             response = self._post(url, headers, payload)
-        if response.status_code == 429 or response.status_code >= 500:
-            raise ImageRequestError(f"图像请求失败（{response.status_code}）：{response.text[:300]}")
         if response.status_code >= 400:
-            raise ProviderError(f"图像请求失败（{response.status_code}）：{response.text[:300]}")
+            raise ImageRequestError(f"图像请求失败（{response.status_code}）：{response.text[:180]}")
         try:
             item = response.json()["data"][0]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -158,7 +188,7 @@ class OpenAIImageProvider:
         if downloaded.status_code >= 500 or downloaded.status_code == 429:
             raise ImageRequestError(f"图像地址无法下载（{downloaded.status_code}）")
         if downloaded.status_code >= 400 or not downloaded.content:
-            raise ProviderError("图像地址无法下载")
+            raise ImageRequestError("图像地址无法下载")
         return downloaded.content
 
 

@@ -82,6 +82,16 @@ def heuristic_scenes(user: str) -> dict:
         merged_end = scenes[-1]["end_line"]
         scenes[-2] = _scene_from_lines(lines, looks, previous["start_line"], merged_end)
         scenes.pop()
+    seen: set[str] = set()
+    for scene in scenes:
+        names: list[str] = []
+        for cursor in range(scene["start_line"], scene["end_line"] + 1):
+            name = str(lines[cursor].get("speaker") or "旁白")
+            if name != "旁白" and name not in names:
+                names.append(name)
+        scene["key"] = (not seen) or any(name not in seen for name in names)
+        scene["location"] = ""
+        seen.update(names)
     return {"scenes": scenes}
 
 

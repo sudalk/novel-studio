@@ -1,5 +1,4 @@
 import logging
-import shutil
 import time
 
 from app.config import Settings
@@ -15,7 +14,7 @@ from app.services.casting import apply_cast
 from app.services.dialogue import estimate_timings, group_dialogue
 from app.services.heuristics import stable_appearance
 from app.services.image_prompt import inter_image_pause
-from app.services.scenes import plan_scenes
+from app.services.scenes import missing_cache_keys, plan_scenes, stamp_cache_keys
 from app.services.script import breakdown_text, line_kind
 from app.services.video import compose_episode
 from app.timeline import line_spans
@@ -102,38 +101,76 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
         ]
         novel_id = episode.novel_id
         style = episode.novel.style or ""
+        cap = _image_cap(settings, episode.novel)
         work = episode_dir(settings, novel_id, episode.id)
-    progress(20, "正在划分场景")
+        cached: dict[str, tuple[object, str | None]] = {}
+        for scene in episode.scenes:
+            if not scene.cache_key or not scene.image_path or scene.cache_key in cached:
+                continue
+            path = from_rel(settings, scene.image_path)
+            if path is not None and path.is_file():
+                cached[scene.cache_key] = (path, scene.source_url)
+    progress(20, "正在挑选关键画面")
     llm = build_llm(settings)
     try:
-        scenes = plan_scenes(line_payload, character_payload, llm, style=style, aspect=settings.resolved_image_aspect())
+        scenes = plan_scenes(
+            line_payload,
+            character_payload,
+            llm,
+            style=style,
+            aspect=settings.resolved_image_aspect(),
+            max_images=cap,
+        )
     finally:
         close_provider(llm)
-    image_provider = build_image(settings)
-    rendered: list[tuple[dict, object, str | None]] = []
     try:
-        scene_dir = work / "scenes"
-        if scene_dir.exists():
-            shutil.rmtree(scene_dir)
-        scene_dir.mkdir(parents=True, exist_ok=True)
-        for index, scene in enumerate(scenes):
+        size = settings.resolved_image_size()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    stamp_cache_keys(scenes, size)
+    needed = missing_cache_keys(scenes, set(cached))
+    image_provider = build_image(settings)
+    fresh: dict[str, tuple[object, str | None]] = {}
+    scene_dir = work / "scenes"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        prompts = {scene["cache_key"]: scene["prompt"] for scene in scenes if scene["key"] and scene.get("prompt")}
+        for index, cache_key in enumerate(needed):
             pause = inter_image_pause(index, image_provider.name, settings.image_gap_sec)
             if pause:
-                progress(30 + int(60 * index / max(len(scenes), 1)), f"等待 {pause:.0f} 秒后绘制下一张")
+                progress(30 + int(40 * index / max(len(needed), 1)), f"等待 {pause:.0f} 秒后绘制下一张")
                 time.sleep(pause)
-            progress(30 + int(60 * index / max(len(scenes), 1)), f"正在绘制场景 {index + 1}/{len(scenes)}")
-            dest = scene_dir / f"{index:02d}.png"
-            source_url = image_provider.generate(scene["prompt"], dest, settings.video_width, settings.video_height)
-            rendered.append((scene, dest, source_url))
+            progress(30 + int(40 * index / max(len(needed), 1)), f"正在绘制关键画面 {index + 1}/{len(needed)}")
+            dest = scene_dir / f"{cache_key[:24]}.png"
+            source_url = image_provider.generate(
+                prompts[cache_key], dest, settings.video_width, settings.video_height
+            )
+            fresh[cache_key] = (dest, source_url)
     finally:
         close_provider(image_provider)
+    if not needed:
+        progress(70, "画面没有变化，沿用已有图片")
+    rendered: list[tuple[dict, object, str | None, str]] = []
+    used: set[object] = set()
+    for scene in scenes:
+        cache_key = scene["cache_key"]
+        if cache_key in fresh:
+            dest, source_url = fresh[cache_key]
+        elif cache_key in cached:
+            dest, source_url = cached[cache_key]
+        else:
+            raise RuntimeError("关键画面没有生成")
+        used.add(dest.resolve())
+        rendered.append((scene, dest, source_url, cache_key))
+    for stale in scene_dir.glob("*.png"):
+        if stale.resolve() not in used:
+            stale.unlink(missing_ok=True)
     with session_scope(session_factory) as db:
         episode = _episode(db, episode_id)
-        # 旧图已经在写出新文件前被删掉。这里不能再按原路径删除，否则会把刚生成的同名图片清掉。
         for scene in list(episode.scenes):
             db.delete(scene)
         db.flush()
-        for index, (scene, dest, source_url) in enumerate(rendered):
+        for index, (scene, dest, source_url, cache_key) in enumerate(rendered):
             db.add(
                 Scene(
                     id=new_id(),
@@ -145,6 +182,8 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
                     prompt=scene["prompt"],
                     image_path=to_rel(settings, dest),
                     source_url=source_url,
+                    key_visual=bool(scene["key"]),
+                    cache_key=cache_key,
                 )
             )
         remove_stored(settings, episode.video_path)
@@ -213,6 +252,13 @@ def run_video(session_factory, settings: Settings, episode_id: str, progress) ->
         episode.error = None
         episode.updated_at = utcnow()
     progress(96, "成片已写好")
+
+
+def _image_cap(settings: Settings, novel) -> int | None:
+    raw = getattr(novel, "image_max", None)
+    if raw is not None and int(raw) > 0:
+        return int(raw)
+    return settings.resolved_image_cap()
 
 
 def _episode(db, episode_id: str) -> Episode:

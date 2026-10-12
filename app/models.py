@@ -12,6 +12,7 @@ class Novel(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     style: Mapped[str] = mapped_column(Text, default="")
+    image_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -112,6 +113,8 @@ class Scene(Base):
     prompt: Mapped[str] = mapped_column(Text, default="")
     image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    key_visual: Mapped[bool] = mapped_column(Boolean, default=True)
+    cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     episode: Mapped[Episode] = relationship(back_populates="scenes")
 

@@ -22,6 +22,22 @@ def test_health_and_mock_config(client):
     assert any(voice["name"] == "故宫纪录片" for voice in voices["voices"])
 
 
+def test_image_cap_is_optional_and_style_keeps_it(client):
+    created = client.post("/api/novels", json={"title": "上限", "text": "雨还在下。\n林晚说道：“等一等。”\n"})
+    assert created.status_code == 200
+    novel = created.json()
+    assert novel["image_max"] is None
+    capped = client.patch(f"/api/novels/{novel['id']}", json={"image_max": 2})
+    assert capped.status_code == 200
+    assert capped.json()["image_max"] == 2
+    styled = client.patch(f"/api/novels/{novel['id']}", json={"style": "水墨"})
+    assert styled.json()["style"] == "水墨"
+    assert styled.json()["image_max"] == 2
+    cleared = client.patch(f"/api/novels/{novel['id']}", json={"image_max": None})
+    assert cleared.json()["image_max"] is None
+    assert cleared.json()["style"] == "水墨"
+
+
 def test_upload_and_edit_line(client):
     response = client.post(
         "/api/novels/upload",
@@ -66,8 +82,11 @@ def test_mock_pipeline_renders_video(client, app):
     assert episode["has_video"] is True
     assert episode["voiced_count"] == episode["line_count"]
     assert episode["illustrated_count"] == episode["scene_count"] > 0
+    assert 1 <= episode["image_count"] <= episode["scene_count"]
+    assert any(scene["key_visual"] for scene in episode["scenes"])
+    assert all(scene["image_url"] for scene in episode["scenes"])
     assert any("风更紧了" in line["text"] for line in episode["lines"])
-    assert "角色外观必须保持一致" in episode["scenes"][0]["prompt"]
+    assert "角色外观必须保持一致" in next(scene["prompt"] for scene in episode["scenes"] if scene["key_visual"])
 
     preview = client.post("/api/voices/preview", json={"voice_id": "voice-lin-wan"})
     assert preview.status_code == 200

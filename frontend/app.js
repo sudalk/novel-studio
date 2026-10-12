@@ -257,6 +257,11 @@ function renderNovel() {
         <p class="lede">整部作品共用。每一镜的提示词会接上这段 STYLE、统一的硬性约束，以及角色外观。</p>
         <textarea id="novel-style" rows="4" placeholder="${esc(novel.style_default || "")}">${esc(novel.style || "")}</textarea>
         <p class="meta" id="style-status">留空则使用上面的默认画风。改完后，重新生成画面才会用到新风格。</p>
+        <div class="cap-row">
+          <label for="image-max">每集关键画面上限</label>
+          <input id="image-max" type="number" min="1" max="24" inputmode="numeric" placeholder="不限制" value="${novel.image_max ? esc(String(novel.image_max)) : ""}">
+        </div>
+        <p class="meta" id="image-max-status">留空则不限制。只给高潮、转折和重要揭示出图，普通场景沿用最近一张。</p>
       </section>
       <div class="split">
         <section class="card block">
@@ -312,6 +317,23 @@ function renderNovel() {
         if (status) status.textContent = error.message;
       }
     }, 400);
+  };
+  const capBox = document.querySelector("#image-max");
+  capBox.onchange = async () => {
+    const raw = capBox.value.trim();
+    const status = document.querySelector("#image-max-status");
+    const imageMax = raw === "" ? null : Number(raw);
+    if (raw !== "" && (!Number.isInteger(imageMax) || imageMax < 1 || imageMax > 24)) {
+      if (status) status.textContent = "上限请填 1 到 24 的整数，或留空表示不限制。";
+      return;
+    }
+    try {
+      const saved = await api(`/api/novels/${novel.id}`, { method: "PATCH", body: { image_max: imageMax } });
+      state.novel = saved;
+      if (status) status.textContent = imageMax ? `已保存：每集最多 ${imageMax} 张关键画面。` : "已保存：不限制张数，只给关键情节出图。";
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    }
   };
   document.querySelector("#add-character").onsubmit = async (event) => {
     event.preventDefault();
@@ -538,7 +560,7 @@ function renderEpisode() {
         <div class="chips">
           <span class="chip ${episode.line_count ? "on" : ""}">台词 ${episode.line_count}</span>
           <span class="chip ${episode.voiced_count === episode.line_count && episode.line_count ? "on" : ""}">配音 ${episode.voiced_count}/${episode.line_count}</span>
-          <span class="chip ${episode.illustrated_count ? "on" : ""}">画面 ${episode.illustrated_count}</span>
+          <span class="chip ${episode.image_count ? "on" : ""}">画面 ${episode.image_count || 0}</span>
           <span class="chip ${episode.has_video ? "on" : ""}">${episode.has_video ? "已成片" : "未成片"}</span>
         </div>
       </div>
@@ -591,7 +613,7 @@ function renderEpisode() {
               ${scene.image_url ? `<img src="${esc(scene.image_url)}?t=${stamp}" alt="">` : `<div class="empty">无图</div>`}
               <div>
                 <p>${esc(scene.summary)}</p>
-                <p class="prompt">台词 ${scene.start_line + 1}–${scene.end_line + 1}</p>
+                <p class="prompt">${scene.key_visual ? "关键画面" : "沿用上一张"} · 台词 ${scene.start_line + 1}–${scene.end_line + 1}</p>
               </div>
             </div>`).join("") || `<div class="empty">生成画面后，场景会列在这里。</div>`}
         </div>

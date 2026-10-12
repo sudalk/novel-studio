@@ -29,13 +29,17 @@ class Settings(BaseSettings):
 
     image_api_key: str = ""
     image_base_url: str = "https://api.aicoming.top/v1"
-    image_model: str = "gpt-image-2.5-flare"
+    # 逗号分隔的轮换列表。留空则用默认三模型。只填 IMAGE_MODEL 时固定为那一个。
+    image_models: str = ""
+    image_model: str = ""
     image_aspect: str = "9:16"
     image_size: str = ""
-    image_timeout_sec: float = 300
+    image_timeout_sec: float = 120
     image_gap_sec: float = 12
     image_max_attempts: int = 6
     image_retry_wait_sec: float = 48
+    # 0 表示不限制。作品自己设了上限时以作品为准。
+    image_max_per_episode: int = 0
 
     mosi_api_key: str = ""
     moss_api_key: str = ""
@@ -102,8 +106,29 @@ class Settings(BaseSettings):
     def resolved_image_base_url(self) -> str:
         return (self.image_base_url or "https://api.aicoming.top/v1").rstrip("/")
 
+    def resolved_image_models(self) -> list[str]:
+        raw = (self.image_models or "").strip()
+        if raw:
+            models = [part.strip() for part in raw.replace("，", ",").split(",") if part.strip()]
+            if models:
+                return models
+        single = (self.image_model or "").strip()
+        if single:
+            return [single]
+        return [
+            "gpt-image-2-1k",
+            "gemini-nano-banana-2.1",
+            "gpt-image-2.5-flare",
+        ]
+
     def resolved_image_model(self) -> str:
-        return (self.image_model or "gpt-image-2.5-flare").strip()
+        return self.resolved_image_models()[0]
+
+    def resolved_image_cap(self) -> int | None:
+        value = int(self.image_max_per_episode or 0)
+        if value <= 0:
+            return None
+        return value
 
     def resolved_image_aspect(self) -> str:
         aspect = (self.image_aspect or "9:16").strip().replace("：", ":")

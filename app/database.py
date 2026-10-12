@@ -45,6 +45,8 @@ def ensure_columns(engine) -> None:
         names = {column["name"] for column in inspector.get_columns("novels")}
         if "style" not in names:
             statements.append("ALTER TABLE novels ADD COLUMN style TEXT DEFAULT '' NOT NULL")
+        if "image_max" not in names:
+            statements.append("ALTER TABLE novels ADD COLUMN image_max INTEGER")
     if "jobs" in tables:
         names = {column["name"] for column in inspector.get_columns("jobs")}
         if "line_id" not in names:
@@ -67,6 +69,10 @@ def ensure_columns(engine) -> None:
         names = {column["name"] for column in inspector.get_columns("scenes")}
         if "source_url" not in names:
             statements.append("ALTER TABLE scenes ADD COLUMN source_url VARCHAR(1000)")
+        if "key_visual" not in names:
+            statements.append("ALTER TABLE scenes ADD COLUMN key_visual BOOLEAN DEFAULT 1 NOT NULL")
+        if "cache_key" not in names:
+            statements.append("ALTER TABLE scenes ADD COLUMN cache_key VARCHAR(64)")
     if not statements:
         return
     with engine.begin() as conn:

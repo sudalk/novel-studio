@@ -103,12 +103,13 @@ pytest
 | `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com`。 |
 | `IMAGE_API_KEY` | 图像密钥。只放在环境变量里，不要提交。 |
 | `IMAGE_BASE_URL` | 默认 `https://api.aicoming.top/v1`，OpenAI 兼容的 images/generations。 |
-| `IMAGE_MODEL` | 默认 `gpt-image-2.5-flare`。备选 `gpt-image-2-2k`。 |
+| `IMAGE_MODELS` | 逗号分隔的轮换列表。留空则用 `gpt-image-2-1k`、`gemini-nano-banana-2.1`、`gpt-image-2.5-flare`。 |
+| `IMAGE_MODEL` | 只固定一个模型时填写，并让 `IMAGE_MODELS` 留空。 |
 | `IMAGE_ASPECT` | 默认 `9:16`（1024x1792）。横屏用 `16:9`。 |
 | `IMAGE_SIZE` | 留空则按画幅映射。填写后覆盖映射。 |
-| `IMAGE_TIMEOUT_SEC` | 单张超时，默认 300，建议 180–600。 |
-| `IMAGE_GAP_SEC` | 两张图之间的间隔，默认 12。mock 不等待。 |
-| `IMAGE_MAX_ATTEMPTS` / `IMAGE_RETRY_WAIT_SEC` | 失败或超时最多 6 次，间隔默认 48 秒。 |
+| `IMAGE_TIMEOUT_SEC` | 单个模型的超时，默认 120 秒。超时或失败会换下一个模型。 |
+| `IMAGE_GAP_SEC` | 两张新图之间的间隔，默认 12。缓存命中和 mock 不等待。 |
+| `IMAGE_MAX_PER_EPISODE` | 每集关键画面上限。`0` 表示不限制。作品页上的数字优先。 |
 | `MOSI_API_KEY` | MOSI 密钥。旧名 `MOSS_API_KEY` 仍可用。 |
 | `MOSS_BASE_URL` | 默认 `https://api.mosi.cn` |
 | `MOSS_MODEL` | 默认 `moss-ttsd-1.0` |
@@ -143,7 +144,7 @@ pytest
 
 ## 图像
 
-`IMAGE_PROVIDER=openai` 调用 `{IMAGE_BASE_URL}/images/generations`。默认地址是 `https://api.aicoming.top/v1`，默认模型 `gpt-image-2.5-flare`，也可以改成 `gpt-image-2-2k`。
+`IMAGE_PROVIDER=openai` 调用 `{IMAGE_BASE_URL}/images/generations`。默认地址是 `https://api.aicoming.top/v1`。模型按 `IMAGE_MODELS` 轮换，默认顺序是 `gpt-image-2-1k`、`gemini-nano-banana-2.1`、`gpt-image-2.5-flare`。每一次出图从下一个模型开始；超时或报错立刻换下一个，每个模型只试一次。
 
 画幅和尺寸：
 
@@ -157,6 +158,8 @@ pytest
 
 成片默认竖屏 9:16，画面 1024x1792，视频 1080×1920。横屏把 `IMAGE_ASPECT` 设为 `16:9`，并改 `VIDEO_WIDTH` / `VIDEO_HEIGHT`。`IMAGE_SIZE` 留空时用上表；写了就覆盖画幅。
 
-同一集的图串行生成，两张之间默认隔 12 秒。单次超时默认 300 秒。失败或超时最多试 6 次，两次之间默认等 48 秒。
+分镜会覆盖全部台词，但只给关键情节出新图：高潮、转折、重要揭示。普通场景不另出图，成片继续显示最近一张关键画面，并做缓慢推拉。一张图可以盖住后面好几句。一整集可以只有一张。作品页可以填「每集关键画面上限」，留空则不限制；环境变量 `IMAGE_MAX_PER_EPISODE` 为 `0` 时同样不限制，作品页上的数字优先。
+
+同一集需要新画的图串行生成，两张之间默认隔 12 秒。提示词和尺寸没变的图会沿用已有文件，不再请求接口。
 
 最终提示词由四段拼成：这一镜的画面、整部作品可编辑的 STYLE、每个角色的外观，以及共用的 COMMON 约束（构图完整，不要水印、标志、签名，不要无关文字和乱码，不要元数据和页脚）。STYLE 在作品页的「画面风格」里改。图片写在 `data/novels/.../scenes/`，接口同时返回本地路径和上游给的 `source_url`。

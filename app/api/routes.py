@@ -39,6 +39,7 @@ class NovelIn(BaseModel):
 
 class NovelPatch(BaseModel):
     style: str | None = Field(default=None, max_length=4000)
+    image_max: int | None = Field(default=None, ge=1, le=24)
 
 
 class CharacterIn(BaseModel):
@@ -157,6 +158,7 @@ def _scene_out(scene) -> dict:
         "end_line": scene.end_line,
         "summary": scene.summary,
         "prompt": scene.prompt,
+        "key_visual": bool(scene.key_visual),
         "image_path": scene.image_path,
         "source_url": scene.source_url,
         "image_url": f"/api/media/scenes/{scene.id}/image" if scene.image_path else None,
@@ -175,6 +177,7 @@ def _episode_summary(episode: Episode) -> dict:
         "voiced_count": sum(1 for line in lines if line.audio_path),
         "scene_count": len(scenes),
         "illustrated_count": sum(1 for scene in scenes if scene.image_path),
+        "image_count": len({scene.image_path for scene in scenes if scene.image_path}),
         "has_video": bool(episode.video_path),
         "updated_at": episode.updated_at,
     }
@@ -210,6 +213,7 @@ def _novel_out(novel: Novel) -> dict:
         "character_count": len(novel.characters),
         "style": novel.style or "",
         "style_default": DEFAULT_STYLE,
+        "image_max": novel.image_max if novel.image_max else None,
         "episodes": [_episode_summary(episode) for episode in novel.episodes],
         "characters": [_character_out(character) for character in _ordered_characters(novel)],
     }
@@ -307,6 +311,8 @@ def config(request: Request):
         "llm_configured": bool(settings.resolved_llm_key()),
         "image_configured": bool(settings.image_api_key.strip()),
         "image_model": settings.resolved_image_model(),
+        "image_models": settings.resolved_image_models(),
+        "image_max_per_episode": settings.resolved_image_cap(),
         "image_aspect": settings.resolved_image_aspect(),
         "moss_configured": bool(settings.resolved_mosi_key()),
         "moss_model": settings.moss_model,
@@ -410,6 +416,8 @@ def patch_novel(novel_id: str, payload: NovelPatch, db: Session = Depends(get_db
     novel = _novel(db, novel_id)
     if payload.style is not None:
         novel.style = payload.style.strip()
+    if "image_max" in payload.model_fields_set:
+        novel.image_max = payload.image_max
     novel.updated_at = utcnow()
     db.commit()
     db.refresh(novel)

@@ -31,6 +31,7 @@ def compose_episode(
     if scene_lengths is None:
         ranges = [(start, end) for start, end, _image in images]
         scene_lengths = scene_durations(ranges, durations)
+    images, scene_lengths = coalesce_holds(images, scene_lengths)
     clip_dir = work_dir / "_clips"
     clip_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
@@ -46,6 +47,25 @@ def compose_episode(
     output.parent.mkdir(parents=True, exist_ok=True)
     _mux(settings, silent, audio_path, srt, output)
     return srt
+
+
+def coalesce_holds(
+    images: list[tuple[int, int, Path]],
+    lengths: list[float],
+) -> tuple[list[tuple[int, int, Path]], list[float]]:
+    """连续使用同一张图时合成一段，推拉不要在每句台词上重新开始。"""
+    merged: list[tuple[int, int, Path]] = []
+    merged_lengths: list[float] = []
+    for image, length in zip(images, lengths):
+        start, end, path = image
+        if merged and merged[-1][2] == path:
+            prev_start, _prev_end, prev_path = merged[-1]
+            merged[-1] = (prev_start, end, prev_path)
+            merged_lengths[-1] += length
+        else:
+            merged.append((start, end, path))
+            merged_lengths.append(length)
+    return merged, merged_lengths
 
 
 def _ken_burns(settings: Settings, image: Path, dest: Path, duration: float, scene_index: int) -> None:
