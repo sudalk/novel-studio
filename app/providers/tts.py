@@ -1,0 +1,244 @@
+import hashlib
+import io
+import json
+import math
+import struct
+import time
+import wave
+
+import httpx
+
+from app.config import Settings
+from app.providers.errors import ProviderError
+from app.providers.voices import PRESET_VOICES, Voice
+
+
+class SynthRequest:
+    def __init__(self, speaker_id: str, speaker_name: str, voice_id: str, text: str):
+        self.speaker_id = speaker_id
+        self.speaker_name = speaker_name
+        self.voice_id = voice_id
+        self.text = text
+
+
+def speaker_key(speaker_id: str) -> str:
+    digest = hashlib.sha1(speaker_id.encode("utf-8")).hexdigest()[:10]
+    return f"spk_{digest}"
+
+
+def write_tone(path, duration: float, frequency: float, framerate: int = 22050) -> None:
+    count = max(1, int(duration * framerate))
+    fade = max(1, int(0.02 * framerate))
+    amplitude = 0.22
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(framerate)
+        frames = bytearray()
+        for index in range(count):
+            envelope = 1.0
+            if index < fade:
+                envelope = index / fade
+            elif index > count - fade:
+                envelope = max(0.0, (count - index) / fade)
+            sample = int(amplitude * envelope * 32767 * math.sin(2 * math.pi * frequency * index / framerate))
+            frames += struct.pack("<h", max(-32767, min(32767, sample)))
+        handle.writeframes(frames)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(buffer.getvalue())
+
+
+def _tone_frequency(name: str) -> float:
+    ladder = (196.0, 220.0, 247.0, 294.0, 330.0, 349.0, 392.0, 440.0, 494.0)
+    digest = hashlib.sha256(name.encode("utf-8")).digest()[0]
+    return ladder[digest % len(ladder)]
+
+
+class MockTTS:
+    name = "mock"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def close(self) -> None:
+        return None
+
+    def list_voices(self) -> list[Voice]:
+        return list(PRESET_VOICES)
+
+    def synthesize_line(self, request: SynthRequest, dest) -> None:
+        per_char = self.settings.mock_tts_sec_per_char
+        duration = len(request.text.strip()) * per_char
+        duration = max(self.settings.mock_tts_min_sec, min(self.settings.mock_tts_max_sec, duration))
+        write_tone(dest, duration, _tone_frequency(request.speaker_name or request.speaker_id))
+
+
+class MosiTTSProvider:
+    """MOSI 多人语音。
+
+    按对话场景调用 POST /v1/audio/speech/speakers（模型 moss-ttsd-1.0）。
+    每一句单独作为一段 segments 提交，从而得到可对齐字幕的时长，再由流水线拼接成一集。
+    这样角色超过两位时也不会超出单次请求的说话人组合。
+    文档：https://platform.mosi.cn/docs/scenarios/dialogue
+    """
+
+    name = "mosi"
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+        self.settings = settings
+        self._client = client or httpx.Client(timeout=httpx.Timeout(180.0, connect=15.0), follow_redirects=True)
+        self._owns_client = client is None
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def _base(self) -> str:
+        return self.settings.moss_base_url.rstrip("/")
+
+    def _headers(self, json_body: bool = True) -> dict[str, str]:
+        if not self.settings.moss_api_key:
+            raise ProviderError("未配置 MOSS_API_KEY")
+        headers = {
+            "Authorization": f"Bearer {self.settings.moss_api_key}",
+            "Platform": "moss-platform",
+        }
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def list_voices(self) -> list[Voice]:
+        voices: list[Voice] = []
+        after: str | None = None
+        for _ in range(6):
+            params: dict[str, str | int] = {"limit": 100}
+            if after:
+                params["after"] = after
+            response = self._client.get(f"{self._base()}/v1/audio/voices", headers=self._headers(False), params=params)
+            self._raise(response)
+            payload = response.json()
+            for item in payload.get("data") or []:
+                voices.append(
+                    Voice(
+                        id=str(item.get("id") or ""),
+                        name=str(item.get("name") or item.get("id") or "未命名音色"),
+                        description=str(item.get("description") or ""),
+                        language=str(item.get("language") or ""),
+                    )
+                )
+            if not payload.get("has_more"):
+                break
+            after = payload.get("next_cursor")
+            if not after:
+                break
+        return [voice for voice in voices if voice.id]
+
+    def synthesize_line(self, request: SynthRequest, dest) -> None:
+        text = request.text.strip()
+        if not text:
+            raise ProviderError("台词是空的")
+        if not request.voice_id:
+            raise ProviderError(f"角色「{request.speaker_name or '未知'}」还没有音色")
+        key = speaker_key(request.speaker_id or request.speaker_name or "speaker")
+        payload: dict = {
+            "model": self.settings.moss_model,
+            "speakers": [{"id": key, "voice_id": request.voice_id}],
+            "segments": [{"speaker": key, "text": text}],
+            "response_format": self.settings.moss_response_format,
+            "delivery_method": self.settings.moss_delivery_method,
+        }
+        if self._use_async(text):
+            payload["async"] = True
+        response = self._client.post(
+            f"{self._base()}/v1/audio/speech/speakers",
+            headers=self._headers(),
+            json=payload,
+        )
+        audio = self._audio_from_response(response)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(audio)
+
+    def _use_async(self, text: str) -> bool:
+        mode = (self.settings.moss_async or "auto").strip().lower()
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        return len(text) >= 280
+
+    def _raise(self, response: httpx.Response) -> None:
+        if response.status_code < 400:
+            return
+        detail = response.text[:500]
+        try:
+            body = response.json()
+            error = body.get("error") if isinstance(body, dict) else None
+            if isinstance(error, dict):
+                detail = error.get("message") or error.get("code") or detail
+            elif isinstance(error, str):
+                detail = error
+        except (json.JSONDecodeError, ValueError):
+            pass
+        raise ProviderError(f"MOSI 请求失败（{response.status_code}）：{detail}")
+
+    def _audio_from_response(self, response: httpx.Response) -> bytes:
+        self._raise(response)
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        if content_type.startswith("audio/") or content_type == "application/octet-stream":
+            if not response.content:
+                raise ProviderError("MOSI 返回了空音频")
+            return response.content
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            if response.content:
+                return response.content
+            raise ProviderError("MOSI 响应无法解析")
+        if not isinstance(data, dict):
+            raise ProviderError("MOSI 响应格式不正确")
+        status = str(data.get("status") or "").upper()
+        if status == "FAILED":
+            raise ProviderError(f"MOSI 合成失败：{data.get('error')}")
+        url = data.get("url")
+        if url and status in {"", "SUCCESS", "SUCCEEDED", "COMPLETED"}:
+            return self._download(str(url))
+        task_id = data.get("task_id") or data.get("id")
+        if task_id and status in {"", "PENDING", "PROCESSING", "QUEUED"}:
+            return self._poll(str(task_id))
+        if url:
+            return self._download(str(url))
+        raise ProviderError(f"无法解析 MOSI 响应：{str(data)[:300]}")
+
+    def _download(self, url: str) -> bytes:
+        response = self._client.get(url, headers=self._headers(False))
+        self._raise(response)
+        if not response.content:
+            raise ProviderError("MOSI 音频地址没有内容")
+        return response.content
+
+    def _poll(self, task_id: str) -> bytes:
+        for _ in range(90):
+            response = self._client.get(
+                f"{self._base()}/v1/audio/tasks/{task_id}",
+                headers=self._headers(False),
+            )
+            self._raise(response)
+            data = response.json()
+            status = str(data.get("status") or "").upper()
+            if status == "SUCCESS":
+                url = data.get("url")
+                if not url:
+                    raise ProviderError("MOSI 任务成功但没有音频地址")
+                return self._download(str(url))
+            if status == "FAILED":
+                raise ProviderError(f"MOSI 任务失败：{data.get('error')}")
+            delay = 2.0
+            retry_after = data.get("retry_after")
+            try:
+                if retry_after is not None:
+                    delay = min(10.0, max(0.2, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = 2.0
+            time.sleep(delay)
+        raise ProviderError("MOSI 任务超时")

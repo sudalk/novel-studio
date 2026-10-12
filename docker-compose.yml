@@ -1,0 +1,35 @@
+services:
+  studio:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-mock}
+      DATA_DIR: /app/data
+      DATABASE_URL: sqlite:////app/data/studio.db
+      JOBS_INLINE: ${JOBS_INLINE:-false}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      TTS_PROVIDER: ${TTS_PROVIDER:-}
+      IMAGE_PROVIDER: ${IMAGE_PROVIDER:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      IMAGE_API_KEY: ${IMAGE_API_KEY:-}
+      IMAGE_BASE_URL: ${IMAGE_BASE_URL:-}
+      IMAGE_MODEL: ${IMAGE_MODEL:-dall-e-3}
+      IMAGE_SIZE: ${IMAGE_SIZE:-1792x1024}
+      MOSS_API_KEY: ${MOSS_API_KEY:-}
+      MOSS_BASE_URL: ${MOSS_BASE_URL:-https://api.mosi.cn}
+      MOSS_MODEL: ${MOSS_MODEL:-moss-ttsd-1.0}
+      MOSS_RESPONSE_FORMAT: ${MOSS_RESPONSE_FORMAT:-wav}
+      MOSS_DELIVERY_METHOD: ${MOSS_DELIVERY_METHOD:-url}
+      MOSS_ASYNC: ${MOSS_ASYNC:-auto}
+      VIDEO_WIDTH: ${VIDEO_WIDTH:-1280}
+      VIDEO_HEIGHT: ${VIDEO_HEIGHT:-720}
+      VIDEO_FPS: ${VIDEO_FPS:-24}
+    volumes:
+      - studio-data:/app/data
+
+volumes:
+  studio-data:
