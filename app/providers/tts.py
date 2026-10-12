@@ -73,6 +73,25 @@ class MockTTS:
         duration = max(self.settings.mock_tts_min_sec, min(self.settings.mock_tts_max_sec, duration))
         write_tone(dest, duration, _tone_frequency(request.speaker_name or request.speaker_id))
 
+    def synthesize_dialogue(self, requests: list[SynthRequest], dest) -> list[tuple[float, float]] | None:
+        if not requests:
+            raise ProviderError("没有台词")
+        pieces = []
+        timings: list[tuple[float, float]] = []
+        cursor = 0.0
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        for index, request in enumerate(requests):
+            piece = dest.with_name(f"{dest.stem}-{index}.wav")
+            self.synthesize_line(request, piece)
+            duration = _wav_duration(piece)
+            timings.append((cursor, cursor + duration))
+            pieces.append(piece)
+            cursor += duration
+        _concat_wavs(pieces, dest)
+        for piece in pieces:
+            piece.unlink(missing_ok=True)
+        return timings
+
 
 class RetryableTTS(ProviderError):
     def __init__(self, message: str, wait: float | None = None):
@@ -204,9 +223,47 @@ class MosiTTSProvider:
             headers=self._headers(),
             json=payload,
         )
-        audio = self._audio_from_response(response)
+        audio, _meta = self._audio_from_response(response)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(audio)
+
+    def synthesize_dialogue(self, requests: list[SynthRequest], dest) -> list[tuple[float, float]] | None:
+        usable = [request for request in requests if request.text.strip()]
+        if not usable:
+            raise ProviderError("台词是空的")
+        speakers: list[dict[str, str]] = []
+        seen: set[str] = set()
+        segments = []
+        for request in usable:
+            if not request.voice_id:
+                raise ProviderError(f"角色「{request.speaker_name or '未知'}」还没有音色")
+            key = speaker_key(request.speaker_id or request.speaker_name or "speaker")
+            if key not in seen:
+                if len(seen) >= 2:
+                    raise ProviderError("一段对话最多两位说话人")
+                seen.add(key)
+                speakers.append({"id": key, "voice_id": request.voice_id})
+            segments.append({"speaker": key, "text": request.text.strip()})
+        payload: dict = {
+            "model": self.settings.moss_model,
+            "speakers": speakers,
+            "segments": segments,
+            "response_format": self.settings.moss_response_format,
+            "delivery_method": self.settings.moss_delivery_method,
+        }
+        combined = "".join(item["text"] for item in segments)
+        if self._use_async(combined):
+            payload["async"] = True
+        response = self._request(
+            "POST",
+            f"{self._base()}/v1/audio/speech/speakers",
+            headers=self._headers(),
+            json=payload,
+        )
+        audio, meta = self._audio_from_response(response)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(audio)
+        return _timings_from_meta(meta, len(usable))
 
     def _use_async(self, text: str) -> bool:
         mode = (self.settings.moss_async or "auto").strip().lower()
@@ -231,18 +288,18 @@ class MosiTTSProvider:
             pass
         raise ProviderError(f"MOSI 请求失败（{response.status_code}）：{detail}")
 
-    def _audio_from_response(self, response: httpx.Response) -> bytes:
+    def _audio_from_response(self, response: httpx.Response) -> tuple[bytes, dict]:
         self._raise(response)
         content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
         if content_type.startswith("audio/") or content_type == "application/octet-stream":
             if not response.content:
                 raise ProviderError("MOSI 返回了空音频")
-            return response.content
+            return response.content, {}
         try:
             data = response.json()
         except json.JSONDecodeError:
             if response.content:
-                return response.content
+                return response.content, {}
             raise ProviderError("MOSI 响应无法解析")
         if not isinstance(data, dict):
             raise ProviderError("MOSI 响应格式不正确")
@@ -251,12 +308,12 @@ class MosiTTSProvider:
             raise ProviderError(f"MOSI 合成失败：{data.get('error')}")
         url = data.get("url")
         if url and status in {"", "SUCCESS", "SUCCEEDED", "COMPLETED"}:
-            return self._download(str(url))
+            return self._download(str(url)), data
         task_id = data.get("task_id") or data.get("id")
         if task_id and status in {"", "PENDING", "PROCESSING", "QUEUED"}:
             return self._poll(str(task_id))
         if url:
-            return self._download(str(url))
+            return self._download(str(url)), data
         raise ProviderError(f"无法解析 MOSI 响应：{str(data)[:300]}")
 
     def _download(self, url: str) -> bytes:
@@ -268,7 +325,7 @@ class MosiTTSProvider:
             raise ProviderError("MOSI 音频地址没有内容")
         return response.content
 
-    def _poll(self, task_id: str) -> bytes:
+    def _poll(self, task_id: str) -> tuple[bytes, dict]:
         for _ in range(90):
             response = self._request(
                 "GET",
@@ -282,7 +339,7 @@ class MosiTTSProvider:
                 url = data.get("url")
                 if not url:
                     raise ProviderError("MOSI 任务成功但没有音频地址")
-                return self._download(str(url))
+                return self._download(str(url)), data
             if status == "FAILED":
                 raise ProviderError(f"MOSI 任务失败：{data.get('error')}")
             delay = 2.0
@@ -301,6 +358,59 @@ def _same_host(url: str, base: str) -> bool:
         return (httpx.URL(url).host or "").lower() == (httpx.URL(base).host or "").lower()
     except Exception:
         return False
+
+
+def _timings_from_meta(meta: dict, count: int) -> list[tuple[float, float]] | None:
+    for key in ("segments", "sentences", "subtitles", "timestamps"):
+        items = meta.get(key)
+        if not isinstance(items, list):
+            continue
+        spans: list[tuple[float, float]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            start = _num(item.get("start") or item.get("start_time") or item.get("begin_time") or item.get("begin"))
+            end = _num(item.get("end") or item.get("end_time") or item.get("stop"))
+            if start is None:
+                continue
+            if end is None:
+                duration = _num(item.get("duration") or item.get("duration_sec"))
+                if duration is None:
+                    continue
+                end = start + duration
+            if end > start:
+                spans.append((float(start), float(end)))
+        if len(spans) == count:
+            return spans
+    return None
+
+
+def _num(value) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wav_duration(path) -> float:
+    with wave.open(str(path), "rb") as handle:
+        frames = handle.getnframes()
+        rate = handle.getframerate() or 1
+        return frames / rate
+
+
+def _concat_wavs(paths, dest) -> None:
+    with wave.open(str(paths[0]), "rb") as first:
+        params = first.getparams()
+        frames = first.readframes(first.getnframes())
+    for path in paths[1:]:
+        with wave.open(str(path), "rb") as handle:
+            frames += handle.readframes(handle.getnframes())
+    with wave.open(str(dest), "wb") as output:
+        output.setparams(params)
+        output.writeframes(frames)
 
 
 def _retry_after(response: httpx.Response) -> float | None:

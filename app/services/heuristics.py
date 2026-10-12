@@ -3,6 +3,7 @@ import json
 import re
 
 from app.providers.errors import ProviderError
+from app.services.casting import profile_for
 
 PRONOUNS = {"他", "她", "我", "你", "它", "他们", "她们", "我们", "大家", "众人"}
 
@@ -43,11 +44,15 @@ def heuristic_script(text: str) -> dict:
             names.append(line["speaker"])
     characters = []
     for name in names:
+        profile = profile_for(name, {})
         characters.append(
             {
                 "name": name,
                 "is_narrator": name == "旁白",
                 "description": "" if name == "旁白" else stable_appearance(name),
+                "gender": profile["gender"],
+                "age": profile["age"],
+                "personality": profile["personality"],
             }
         )
     return {"characters": characters, "lines": lines}

@@ -9,8 +9,10 @@ from app.models import Character, Episode, Scene, ScriptLine
 from app.paths import episode_dir, from_rel, remove_stored, to_rel
 from app.providers.factory import build_image, build_llm, build_tts, close_provider
 from app.providers.tts import SynthRequest
-from app.providers.voices import assign_default_voice
-from app.services.audio import normalize_wav, stitch_wavs
+from app.providers.voices import PRESET_VOICES
+from app.services.audio import SEGMENT_PAUSE, mix_segments, normalize_wav, slice_wav
+from app.services.casting import apply_cast
+from app.services.dialogue import estimate_timings, group_dialogue
 from app.services.heuristics import stable_appearance
 from app.services.image_prompt import inter_image_pause
 from app.services.scenes import plan_scenes
@@ -71,134 +73,18 @@ def run_breakdown(session_factory, settings: Settings, episode_id: str, progress
 
 
 def run_tts(session_factory, settings: Settings, episode_id: str, progress) -> None:
-    with session_scope(session_factory) as db:
-        episode = _episode(db, episode_id)
-        lines = list(episode.lines)
-        if not lines:
-            raise RuntimeError("还没有台词，请先拆解剧本")
-        characters = {item.name: item for item in episode.novel.characters}
-        missing = sorted({line.speaker for line in lines if not characters.get(line.speaker) or not characters[line.speaker].voice_id})
-        if missing:
-            raise RuntimeError("这些角色还没有音色：" + "、".join(missing))
-        plan = [
-            {
-                "line_id": line.id,
-                "speaker": line.speaker,
-                "character_id": characters[line.speaker].id,
-                "voice_id": characters[line.speaker].voice_id,
-                "text": line.text,
-            }
-            for line in lines
-        ]
-        novel_id = episode.novel_id
-        work = episode_dir(settings, novel_id, episode.id)
-        old_mix = episode.audio_path
-        old_video = episode.video_path
-        old_srt = episode.subtitle_path
-    for stale in (old_mix, old_video, old_srt):
-        remove_stored(settings, stale)
-    tts = build_tts(settings)
-    wav_paths = []
-    durations = []
-    try:
-        line_dir = work / "lines"
-        line_dir.mkdir(parents=True, exist_ok=True)
-        for index, item in enumerate(plan):
-            if index and tts.name != "mock" and settings.moss_gap_sec > 0:
-                progress(10 + int(70 * index / max(len(plan), 1)), f"等待 {settings.moss_gap_sec:.0f} 秒后合成下一句")
-                time.sleep(settings.moss_gap_sec)
-            progress(10 + int(70 * index / max(len(plan), 1)), f"正在合成第 {index + 1}/{len(plan)} 句")
-            raw = line_dir / f"{item['line_id']}.raw"
-            wav = line_dir / f"{item['line_id']}.wav"
-            tts.synthesize_line(
-                SynthRequest(item["character_id"], item["speaker"], item["voice_id"], item["text"]),
-                raw,
-            )
-            normalize_wav(raw, wav)
-            if raw.exists() and raw.resolve() != wav.resolve():
-                raw.unlink()
-            durations.append(probe_duration(wav))
-            wav_paths.append(wav)
-    finally:
-        close_provider(tts)
-    progress(88, "正在拼接整集配音")
-    mix = work / "episode.wav"
-    stitch_wavs(wav_paths, mix)
-    with session_scope(session_factory) as db:
-        episode = _episode(db, episode_id)
-        by_id = {line.id: line for line in episode.lines}
-        for item, wav, duration in zip(plan, wav_paths, durations):
-            line = by_id[item["line_id"]]
-            line.audio_path = to_rel(settings, wav)
-            line.duration_sec = duration
-        remove_stored(settings, episode.video_path)
-        remove_stored(settings, episode.subtitle_path)
-        episode.audio_path = to_rel(settings, mix)
-        episode.video_path = None
-        episode.subtitle_path = None
-        episode.status = _status(episode)
-        episode.error = None
-        episode.updated_at = utcnow()
+    plan, work = _tts_plan(session_factory, settings, episode_id)
+    _render_dialogue(settings, plan, work, progress, only_group=None)
+    _store_dialogue(session_factory, settings, episode_id, plan, work)
 
 
 def run_line_tts(session_factory, settings: Settings, episode_id: str, line_id: str, progress) -> None:
-    with session_scope(session_factory) as db:
-        episode = _episode(db, episode_id)
-        line = next((item for item in episode.lines if item.id == line_id), None)
-        if line is None:
-            raise RuntimeError("台词不存在")
-        character = next((item for item in episode.novel.characters if item.name == line.speaker), None)
-        if character is None or not character.voice_id:
-            raise RuntimeError(f"角色「{line.speaker}」还没有音色")
-        work = episode_dir(settings, episode.novel_id, episode.id)
-        text = line.text
-        voice_id = character.voice_id
-        speaker = line.speaker
-        character_id = character.id
-    progress(20, "正在重配这一句")
-    tts = build_tts(settings)
-    try:
-        line_dir = work / "lines"
-        line_dir.mkdir(parents=True, exist_ok=True)
-        raw = line_dir / f"{line_id}.raw"
-        wav = line_dir / f"{line_id}.wav"
-        tts.synthesize_line(SynthRequest(character_id, speaker, voice_id, text), raw)
-        normalize_wav(raw, wav)
-        if raw.exists() and raw.resolve() != wav.resolve():
-            raw.unlink()
-        duration = probe_duration(wav)
-    finally:
-        close_provider(tts)
-    progress(80, "正在更新整集配音")
-    with session_scope(session_factory) as db:
-        episode = _episode(db, episode_id)
-        line = next((item for item in episode.lines if item.id == line_id), None)
-        if line is None:
-            raise RuntimeError("台词不存在")
-        line.audio_path = to_rel(settings, wav)
-        line.duration_sec = duration
-        remove_stored(settings, episode.audio_path)
-        remove_stored(settings, episode.video_path)
-        remove_stored(settings, episode.subtitle_path)
-        episode.audio_path = None
-        episode.video_path = None
-        episode.subtitle_path = None
-        lines = list(episode.lines)
-        if lines and all(item.audio_path and item.duration_sec for item in lines):
-            paths = []
-            for item in lines:
-                resolved = from_rel(settings, item.audio_path)
-                if resolved is None or not resolved.is_file():
-                    paths = []
-                    break
-                paths.append(resolved)
-            if len(paths) == len(lines):
-                mix = work / "episode.wav"
-                stitch_wavs(paths, mix)
-                episode.audio_path = to_rel(settings, mix)
-        episode.status = _status(episode)
-        episode.error = None
-        episode.updated_at = utcnow()
+    plan, work = _tts_plan(session_factory, settings, episode_id)
+    groups = group_dialogue(plan)
+    only = next(index for index, group in enumerate(groups) if any(item["line_id"] == line_id for item in group))
+    progress(20, "正在重配这一段对话")
+    _render_dialogue(settings, plan, work, progress, only_group=only)
+    _store_dialogue(session_factory, settings, episode_id, plan, work)
 
 
 def run_illustrate(session_factory, settings: Settings, episode_id: str, progress) -> None:
@@ -284,11 +170,21 @@ def run_video(session_factory, settings: Settings, episode_id: str, progress) ->
         if not _scenes_cover(scenes, len(lines)):
             raise RuntimeError("分镜和当前台词对不上，请重新生成画面")
         durations = [float(line.duration_sec or 0) for line in lines]
-        spans = line_spans(durations)
-        cues = []
-        for line, span in zip(lines, spans):
-            label = line.text if line.kind == "narrator" else f"{line.speaker}：{line.text}"
-            cues.append((span.start, span.end, label))
+        timed = all(line.start_sec is not None for line in lines)
+        if timed:
+            cues = []
+            for line in lines:
+                label = line.text if line.kind == "narrator" else f"{line.speaker}：{line.text}"
+                start = float(line.start_sec or 0)
+                cues.append((start, start + float(line.duration_sec or 0), label))
+            scene_lengths = None
+        else:
+            spans = line_spans(durations)
+            cues = []
+            for line, span in zip(lines, spans):
+                label = line.text if line.kind == "narrator" else f"{line.speaker}：{line.text}"
+                cues.append((span.start, span.end, label))
+            scene_lengths = None
         images = []
         for scene in scenes:
             resolved = from_rel(settings, scene.image_path)
@@ -298,11 +194,15 @@ def run_video(session_factory, settings: Settings, episode_id: str, progress) ->
         audio = from_rel(settings, episode.audio_path)
         if audio is None or not audio.is_file():
             raise RuntimeError("整集配音丢失，请重新合成配音")
+        if timed:
+            scene_lengths = _scene_lengths_from_starts(scenes, lines, probe_duration(audio))
         work = episode_dir(settings, episode.novel_id, episode.id)
         output = work / "episode.mp4"
     progress(40, "正在铺画面、字幕和声音")
     try:
-        srt = compose_episode(settings, work, images, durations, cues, audio, output)
+        srt = compose_episode(
+            settings, work, images, durations, cues, audio, output, scene_lengths=scene_lengths
+        )
     except MediaError as exc:
         raise RuntimeError(str(exc)) from exc
     with session_scope(session_factory) as db:
@@ -329,8 +229,6 @@ def _ensure_characters(db, settings: Settings, novel, characters: list[dict]) ->
         if name and name not in ordered:
             ordered.append(name)
     info = {item["name"]: item for item in characters}
-    role_index = 0
-    mock_voices = settings.resolved_tts() == "mock"
     for name in ordered:
         payload = info.get(name, {})
         character = existing.get(name)
@@ -342,6 +240,10 @@ def _ensure_characters(db, settings: Settings, novel, characters: list[dict]) ->
                 description="",
                 voice_id="",
                 voice_name="",
+                voice_locked=False,
+                gender="",
+                age="",
+                personality="",
                 is_narrator=name == "旁白",
                 created_at=utcnow(),
             )
@@ -349,13 +251,9 @@ def _ensure_characters(db, settings: Settings, novel, characters: list[dict]) ->
             existing[name] = character
         if name != "旁白" and not character.description:
             character.description = (payload.get("description") or "").strip() or stable_appearance(name)
-        if mock_voices and not character.voice_id:
-            voice = assign_default_voice(character.is_narrator or name == "旁白", -1 if name == "旁白" else role_index)
-            character.voice_id = voice.id
-            character.voice_name = voice.name
-        if name != "旁白":
-            role_index += 1
     db.flush()
+    voices = _voice_catalog(settings)
+    apply_cast(list(existing.values()), info, voices)
 
 
 def _clear_generated(db, settings: Settings, episode: Episode, drop_lines: bool, drop_scenes: bool) -> None:
@@ -363,6 +261,7 @@ def _clear_generated(db, settings: Settings, episode: Episode, drop_lines: bool,
         remove_stored(settings, line.audio_path)
         line.audio_path = None
         line.duration_sec = None
+        line.start_sec = None
         if drop_lines:
             db.delete(line)
     for scene in list(episode.scenes):
@@ -403,11 +302,160 @@ def _status(episode: Episode) -> str:
     return "imported"
 
 
+def _tts_plan(session_factory, settings: Settings, episode_id: str):
+    with session_scope(session_factory) as db:
+        episode = _episode(db, episode_id)
+        lines = list(episode.lines)
+        if not lines:
+            raise RuntimeError("还没有台词，请先拆解剧本")
+        characters = {item.name: item for item in episode.novel.characters}
+        missing = sorted(
+            {line.speaker for line in lines if not characters.get(line.speaker) or not characters[line.speaker].voice_id}
+        )
+        if missing:
+            raise RuntimeError("这些角色还没有音色：" + "、".join(missing))
+        plan = [
+            {
+                "line_id": line.id,
+                "speaker": line.speaker,
+                "character_id": characters[line.speaker].id,
+                "voice_id": characters[line.speaker].voice_id,
+                "text": line.text,
+                "duration_sec": line.duration_sec,
+            }
+            for line in lines
+        ]
+        work = episode_dir(settings, episode.novel_id, episode.id)
+        for stale in (episode.audio_path, episode.video_path, episode.subtitle_path):
+            remove_stored(settings, stale)
+    return plan, work
+
+
+def _render_dialogue(settings: Settings, plan: list[dict], work, progress, only_group: int | None) -> None:
+    groups = group_dialogue(plan)
+    seg_dir = work / "segments"
+    line_dir = work / "lines"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    line_dir.mkdir(parents=True, exist_ok=True)
+    seg_paths = [seg_dir / f"{index:02d}.wav" for index in range(len(groups))]
+    tts = build_tts(settings)
+    calls = 0
+    try:
+        for index, group in enumerate(groups):
+            dest = seg_paths[index]
+            if only_group is not None and index != only_group and dest.is_file():
+                _fill_local_from_weights(group, probe_duration(dest))
+                continue
+            if calls and tts.name != "mock" and settings.moss_gap_sec > 0:
+                progress(30, f"等待 {settings.moss_gap_sec:.0f} 秒后合成下一段")
+                time.sleep(settings.moss_gap_sec)
+            calls += 1
+            progress(15 + int(60 * index / max(len(groups), 1)), f"正在合成第 {index + 1}/{len(groups)} 段")
+            raw = seg_dir / f"{index:02d}.raw"
+            requests = [
+                SynthRequest(item["character_id"], item["speaker"], item["voice_id"], item["text"]) for item in group
+            ]
+            timings = tts.synthesize_dialogue(requests, raw)
+            normalize_wav(raw, dest)
+            raw.unlink(missing_ok=True)
+            duration = probe_duration(dest)
+            if not timings or len(timings) != len(group):
+                timings = estimate_timings([len(item["text"]) for item in group], duration)
+            else:
+                end = max(span[1] for span in timings) or duration
+                scale = duration / end if end else 1.0
+                timings = [(start * scale, min(duration, stop * scale)) for start, stop in timings]
+            for item, (start, stop) in zip(group, timings):
+                stop = max(start + 0.05, min(duration, stop))
+                slice_wav(dest, line_dir / f"{item['line_id']}.wav", start, stop)
+                item["local_start"] = start
+                item["local_end"] = stop
+    finally:
+        close_provider(tts)
+    progress(88, "正在衔接整集配音")
+    mix = work / "episode.wav"
+    mix_segments(seg_paths, mix, pause=SEGMENT_PAUSE)
+    cursor = 0.0
+    expected = 0.0
+    for index, group in enumerate(groups):
+        seg_duration = probe_duration(seg_paths[index])
+        if any("local_start" not in item for item in group):
+            _fill_local_from_weights(group, seg_duration)
+        for item in group:
+            item["abs_start"] = cursor + float(item["local_start"])
+            item["duration"] = max(0.05, float(item["local_end"]) - float(item["local_start"]))
+        cursor += seg_duration
+        expected += seg_duration
+        if index != len(groups) - 1:
+            cursor += SEGMENT_PAUSE
+            expected += SEGMENT_PAUSE
+    final = probe_duration(mix)
+    if expected > 0 and abs(final - expected) > 0.08:
+        scale = final / expected
+        for group in groups:
+            for item in group:
+                item["abs_start"] = float(item["abs_start"]) * scale
+                item["duration"] = float(item["duration"]) * scale
+
+
+def _fill_local_from_weights(group: list[dict], duration: float) -> None:
+    weights = [float(item.get("duration_sec") or 0) or len(item["text"]) for item in group]
+    for item, (start, stop) in zip(group, estimate_timings(weights, duration)):
+        item["local_start"] = start
+        item["local_end"] = stop
+
+
+def _store_dialogue(session_factory, settings: Settings, episode_id: str, plan: list[dict], work) -> None:
+    mix = work / "episode.wav"
+    with session_scope(session_factory) as db:
+        episode = _episode(db, episode_id)
+        by_id = {line.id: line for line in episode.lines}
+        for item in plan:
+            line = by_id[item["line_id"]]
+            wav = work / "lines" / f"{item['line_id']}.wav"
+            line.audio_path = to_rel(settings, wav)
+            line.duration_sec = float(item["duration"])
+            line.start_sec = float(item["abs_start"])
+        remove_stored(settings, episode.video_path)
+        remove_stored(settings, episode.subtitle_path)
+        episode.audio_path = to_rel(settings, mix)
+        episode.video_path = None
+        episode.subtitle_path = None
+        episode.status = _status(episode)
+        episode.error = None
+        episode.updated_at = utcnow()
+
+
+def _voice_catalog(settings: Settings):
+    provider = build_tts(settings)
+    try:
+        return provider.list_voices()
+    except Exception:
+        logger.warning("音色列表拉取失败，改用内置预设")
+        return list(PRESET_VOICES)
+    finally:
+        close_provider(provider)
+
+
+def _scene_lengths_from_starts(scenes, lines, audio_total: float) -> list[float]:
+    lengths = []
+    ordered = sorted(scenes, key=lambda scene: scene.position)
+    for index, scene in enumerate(ordered):
+        start = float(lines[scene.start_line].start_sec or 0)
+        if index + 1 < len(ordered):
+            end = float(lines[ordered[index + 1].start_line].start_sec or start)
+        else:
+            end = audio_total
+        lengths.append(max(0.05, end - start))
+    return lengths
+
+
 def invalidate_after_line_edit(settings: Settings, episode: Episode, line: ScriptLine | None = None) -> None:
     if line is not None:
         remove_stored(settings, line.audio_path)
         line.audio_path = None
         line.duration_sec = None
+        line.start_sec = None
     remove_stored(settings, episode.audio_path)
     remove_stored(settings, episode.video_path)
     remove_stored(settings, episode.subtitle_path)

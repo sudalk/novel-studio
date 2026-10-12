@@ -51,6 +51,7 @@ def test_mock_pipeline_renders_video(client, app):
     patched = client.patch(f"/api/characters/{lin['id']}", json={"voice_id": "voice-lin-wan", "voice_name": "林晚的音色"})
     assert patched.status_code == 200
     assert patched.json()["voice_id"] == "voice-lin-wan"
+    assert patched.json()["voice_locked"] is True
 
     first_line = episode["lines"][0]
     edited = client.patch(f"/api/lines/{first_line['id']}", json={"text": first_line["text"] + "风更紧了。"})

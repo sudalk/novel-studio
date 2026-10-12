@@ -7,10 +7,10 @@ from app.fonts import find_cjk_font
 from app.timeline import scene_durations
 
 
-def write_srt(path: Path, cues: list[tuple[float, float, str]]) -> None:
+def write_srt(path: Path, cues: list[tuple[float, float, str]], width: int = 18) -> None:
     blocks: list[str] = []
     for index, (start, end, text) in enumerate(cues, start=1):
-        blocks.append(f"{index}\n{_ts(start)} --> {_ts(end)}\n{_wrap_subtitle(text)}\n")
+        blocks.append(f"{index}\n{_ts(start)} --> {_ts(end)}\n{_wrap_subtitle(text, width)}\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(blocks), encoding="utf-8")
 
@@ -23,12 +23,14 @@ def compose_episode(
     cues: list[tuple[float, float, str]],
     audio_path: Path,
     output: Path,
+    scene_lengths: list[float] | None = None,
 ) -> Path:
     """images 是 (start_line, end_line, image_path)。"""
     if len(images) == 0:
         raise RuntimeError("没有画面可以合成")
-    ranges = [(start, end) for start, end, _image in images]
-    scene_lengths = scene_durations(ranges, durations)
+    if scene_lengths is None:
+        ranges = [(start, end) for start, end, _image in images]
+        scene_lengths = scene_durations(ranges, durations)
     clip_dir = work_dir / "_clips"
     clip_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
@@ -39,7 +41,8 @@ def compose_episode(
     silent = work_dir / "_silent.mp4"
     _concat_videos(clips, silent, settings)
     srt = work_dir / "episode.srt"
-    write_srt(srt, cues)
+    wrap = 12 if settings.video_height > settings.video_width else 18
+    write_srt(srt, cues, width=wrap)
     output.parent.mkdir(parents=True, exist_ok=True)
     _mux(settings, silent, audio_path, srt, output)
     return srt
@@ -129,7 +132,7 @@ def _concat_videos(clips: list[Path], dest: Path, settings: Settings) -> None:
 
 def _mux(settings: Settings, video: Path, audio: Path, srt: Path, dest: Path) -> None:
     font = find_cjk_font()
-    subtitle_filter = _subtitle_filter(srt, font)
+    subtitle_filter = _subtitle_filter(srt, font, settings)
     ffmpeg_run(
         [
             "ffmpeg",
@@ -158,9 +161,15 @@ def _mux(settings: Settings, video: Path, audio: Path, srt: Path, dest: Path) ->
     )
 
 
-def _subtitle_filter(srt: Path, font) -> str:
+def _subtitle_filter(srt: Path, font, settings: Settings) -> str:
     escaped = _filter_path(srt)
-    style = "FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=36"
+    vertical = settings.video_height > settings.video_width
+    size = max(36, settings.video_height // 28) if vertical else 22
+    margin = max(72, settings.video_height // 12) if vertical else 36
+    style = (
+        f"FontSize={size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,"
+        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV={margin}"
+    )
     if font is not None:
         style = f"FontName={font.family}," + style
         fontsdir = _filter_path(font.file.parent)

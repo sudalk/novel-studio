@@ -31,7 +31,7 @@ def size_for_aspect(aspect: str) -> str:
         raise ValueError(f"不支持的画幅 {aspect or '空'}。可选：{known}") from exc
 
 
-def compose_image_prompt(body: str, style: str, looks: dict[str, str], aspect: str = "16:9") -> str:
+def compose_image_prompt(body: str, style: str, looks: dict[str, str], aspect: str = "9:16") -> str:
     picture = (body or "").strip() or "按台词呈现这一镜的环境与人物动作"
     series = (style or "").strip() or DEFAULT_STYLE
     bits = []
@@ -40,7 +40,7 @@ def compose_image_prompt(body: str, style: str, looks: dict[str, str], aspect: s
             continue
         bits.append(f"{name}：{(description or '').strip() or '外观保持与本系列其他镜头一致'}")
     appearance = "\n".join(bits) if bits else "这一镜以环境和光影为主，不引入需要固定外形的新角色。"
-    ratio = (aspect or "16:9").strip().replace("：", ":") or "16:9"
+    ratio = (aspect or "9:16").strip().replace("：", ":") or "9:16"
     return (
         f"画面：\n画幅 {ratio}。{picture}\n\n"
         f"STYLE\n{series}\n\n"

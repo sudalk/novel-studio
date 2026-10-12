@@ -104,7 +104,7 @@ pytest
 | `IMAGE_API_KEY` | 图像密钥。只放在环境变量里，不要提交。 |
 | `IMAGE_BASE_URL` | 默认 `https://api.aicoming.top/v1`，OpenAI 兼容的 images/generations。 |
 | `IMAGE_MODEL` | 默认 `gpt-image-2.5-flare`。备选 `gpt-image-2-2k`。 |
-| `IMAGE_ASPECT` | 默认 `16:9`。竖屏用 `9:16`。尺寸见下方图像一节。 |
+| `IMAGE_ASPECT` | 默认 `9:16`（1024x1792）。横屏用 `16:9`。 |
 | `IMAGE_SIZE` | 留空则按画幅映射。填写后覆盖映射。 |
 | `IMAGE_TIMEOUT_SEC` | 单张超时，默认 300，建议 180–600。 |
 | `IMAGE_GAP_SEC` | 两张图之间的间隔，默认 12。mock 不等待。 |
@@ -115,7 +115,7 @@ pytest
 | `MOSS_RESPONSE_FORMAT` | 默认 `wav`。也可用文档里的 mp3、pcm、flac、aac、opus。 |
 | `MOSS_DELIVERY_METHOD` | `url`（默认，JSON 里带音频地址）或 `audio`（直接返回音频）。 |
 | `MOSS_ASYNC` | `auto`（长句改走异步任务）、`always`、`never` |
-| `VIDEO_WIDTH` / `VIDEO_HEIGHT` / `VIDEO_FPS` | 成片尺寸和帧率，默认 1280×720、24fps |
+| `VIDEO_WIDTH` / `VIDEO_HEIGHT` / `VIDEO_FPS` | 成片尺寸和帧率，默认 1080×1920、24fps |
 
 真实模式至少需要：
 
@@ -137,7 +137,7 @@ pytest
 - `delivery_method=url` 时读取响应里的 `url`；`audio` 时直接保存音频
 - 请求体带 `async=true` 时，用返回的 `task_id` 轮询 `GET /v1/audio/tasks/{task_id}`，成功后下载 `url`
 
-每一句单独作为一段提交，是为了拿到这一句的时长，字幕才能对准。小说里的角色往往超过两位，而这个模型面向双人对话；逐句调用只带当前这一个说话人，再由 ffmpeg 拼成一集。同一集里两句之间默认停 1.5 秒（`MOSS_GAP_SEC`）。429、5xx 和超时会重试，最多 `MOSS_MAX_ATTEMPTS` 次（默认 4）；响应里有 `Retry-After` 就按它等，否则等 `MOSS_RETRY_WAIT_SEC`（默认 8 秒）。
+连续台词按最多两位说话人收成一段，一次调用 `moss-ttsd-1.0`。旁白会跟下一位角色留在同一段里。超过两位就另起一段。同一角色在所有段里用同一个 `voice_id` 和说话人 id。段与段之间做短停顿、交叉淡化，并统一响度。字幕时间优先用接口返回的时间戳，没有的话按字数在这一段里估算。拆剧本时会记下性别、年龄和性格，并自动选一把音色；用户在界面里改过的音色会被锁定，后面的集不再改。两次请求之间默认停 1.5 秒（`MOSS_GAP_SEC`）。429、5xx 和超时会重试，最多 `MOSS_MAX_ATTEMPTS` 次（默认 4）。
 
 音色在分集工作台右侧的「音色设置」里选。旁白和每个角色各有一把音色，可以试听，也可以粘贴 `voice_id`。每一句旁边的「重配」只重做这一句，然后重新拼接整集音频；成片会作废，需要再合成视频。密钥只放在环境变量里，不要写进前端。
 
@@ -155,7 +155,7 @@ pytest
 | 4:3 | 1792x1344 |
 | 3:4 | 1344x1792 |
 
-成片默认 16:9。竖屏把 `IMAGE_ASPECT` 设为 `9:16`，并改 `VIDEO_WIDTH` / `VIDEO_HEIGHT`。`IMAGE_SIZE` 留空时用上表；写了就覆盖画幅。
+成片默认竖屏 9:16，画面 1024x1792，视频 1080×1920。横屏把 `IMAGE_ASPECT` 设为 `16:9`，并改 `VIDEO_WIDTH` / `VIDEO_HEIGHT`。`IMAGE_SIZE` 留空时用上表；写了就覆盖画幅。
 
 同一集的图串行生成，两张之间默认隔 12 秒。单次超时默认 300 秒。失败或超时最多试 6 次，两次之间默认等 48 秒。
 

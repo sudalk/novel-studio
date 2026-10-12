@@ -331,6 +331,16 @@ function avatarStyle(character) {
   return `background:hsl(${hash} 52% 46%)`;
 }
 
+function genderLabel(value) {
+  return { female: "女", male: "男", unknown: "" }[value] || "";
+}
+function ageLabel(value) {
+  return { youth: "青年", adult: "成年", mature: "中年" }[value] || "";
+}
+function personalityLabel(value) {
+  return { gentle: "温柔", calm: "沉稳", lively: "灵动", stern: "沉稳" }[value] || "";
+}
+
 function voiceCatalog() {
   const seen = new Set();
   const voices = [];
@@ -350,9 +360,13 @@ function characterCard(character) {
   const initial = esc((character.name || "?").slice(0, 1));
   const current = voiceById(character.voice_id);
   const label = current ? current.name : (character.voice_name || "未指定音色");
-  const detail = current
+  const traits = [genderLabel(character.gender), ageLabel(character.age), personalityLabel(character.personality)]
+    .filter(Boolean)
+    .join(" · ");
+  const lock = character.voice_locked ? "已锁定" : "自动分配";
+  const detail = [traits, lock].filter(Boolean).join(" · ") || (current
     ? [current.language, current.description].filter(Boolean).join(" · ")
-    : "从下面选择，或粘贴 voice_id";
+    : "从下面选择，或粘贴 voice_id");
   const rows = voiceCatalog().map((voice) => `
     <div class="voice-row ${voice.id === character.voice_id ? "on" : ""}">
       <button type="button" class="voice-pick" data-pick-voice="${esc(voice.id)}">

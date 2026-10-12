@@ -94,6 +94,33 @@ def test_async_task_is_polled(tmp_path):
     assert dest.exists()
 
 
+def test_two_speakers_share_one_request(tmp_path):
+    captured = {}
+    wav = _wav_bytes(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, content=wav, headers={"content-type": "audio/wav"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = MosiTTSProvider(_settings(), client=client)
+    dest = tmp_path / "pair.wav"
+    provider.synthesize_dialogue(
+        [
+            SynthRequest("narrator", "旁白", "voice-narr", "雨下了一夜。"),
+            SynthRequest("lin", "林晚", "voice-lin", "别往北走。"),
+        ],
+        dest,
+    )
+    provider.close()
+    body = captured["body"]
+    assert body["model"] == "moss-ttsd-1.0"
+    assert [item["voice_id"] for item in body["speakers"]] == ["voice-narr", "voice-lin"]
+    assert [item["text"] for item in body["segments"]] == ["雨下了一夜。", "别往北走。"]
+    assert body["segments"][0]["speaker"] == body["speakers"][0]["id"]
+    assert dest.read_bytes().startswith(b"RIFF")
+
+
 def test_missing_key(tmp_path):
     provider = MosiTTSProvider(_settings(moss_api_key="", mosi_api_key=""))
     try:

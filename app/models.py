@@ -41,6 +41,10 @@ class Character(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     voice_id: Mapped[str] = mapped_column(String(80), default="")
     voice_name: Mapped[str] = mapped_column(String(120), default="")
+    voice_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    gender: Mapped[str] = mapped_column(String(20), default="")
+    age: Mapped[str] = mapped_column(String(20), default="")
+    personality: Mapped[str] = mapped_column(String(20), default="")
     is_narrator: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -91,6 +95,7 @@ class ScriptLine(Base):
     text: Mapped[str] = mapped_column(Text)
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     episode: Mapped[Episode] = relationship(back_populates="lines")
 

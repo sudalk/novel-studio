@@ -129,6 +129,10 @@ def _character_out(character: Character) -> dict:
         "description": character.description,
         "voice_id": character.voice_id,
         "voice_name": character.voice_name,
+        "voice_locked": bool(character.voice_locked),
+        "gender": character.gender,
+        "age": character.age,
+        "personality": character.personality,
         "is_narrator": character.is_narrator,
     }
 
@@ -465,7 +469,10 @@ def patch_character(character_id: str, payload: CharacterPatch, db: Session = De
     if payload.description is not None:
         character.description = payload.description.strip()
     if payload.voice_id is not None:
-        character.voice_id = payload.voice_id.strip()
+        new_voice = payload.voice_id.strip()
+        if new_voice != (character.voice_id or ""):
+            character.voice_locked = True
+        character.voice_id = new_voice
     if payload.voice_name is not None:
         character.voice_name = payload.voice_name.strip()
     character.novel.updated_at = utcnow()

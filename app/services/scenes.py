@@ -6,7 +6,7 @@ from app.services.image_prompt import compose_image_prompt
 from app.services.prompts import SCENE_SYSTEM
 
 
-def plan_scenes(lines: list[dict], characters: list[dict], llm, style: str = "", aspect: str = "16:9") -> list[dict]:
+def plan_scenes(lines: list[dict], characters: list[dict], llm, style: str = "", aspect: str = "9:16") -> list[dict]:
     payload = {
         "characters": [
             {"name": item["name"], "description": item.get("description") or ""}

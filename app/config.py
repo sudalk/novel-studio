@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     image_api_key: str = ""
     image_base_url: str = "https://api.aicoming.top/v1"
     image_model: str = "gpt-image-2.5-flare"
-    image_aspect: str = "16:9"
+    image_aspect: str = "9:16"
     image_size: str = ""
     image_timeout_sec: float = 300
     image_gap_sec: float = 12
@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     moss_max_attempts: int = 4
     moss_retry_wait_sec: float = 8
 
-    video_width: int = 1280
-    video_height: int = 720
+    video_width: int = 1080
+    video_height: int = 1920
     video_fps: int = 24
     video_preset: str = "veryfast"
 
@@ -106,8 +106,8 @@ class Settings(BaseSettings):
         return (self.image_model or "gpt-image-2.5-flare").strip()
 
     def resolved_image_aspect(self) -> str:
-        aspect = (self.image_aspect or "16:9").strip().replace("：", ":")
-        return aspect or "16:9"
+        aspect = (self.image_aspect or "9:16").strip().replace("：", ":")
+        return aspect or "9:16"
 
     def resolved_image_size(self) -> str:
         from app.services.image_prompt import size_for_aspect

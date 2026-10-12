@@ -49,6 +49,20 @@ def ensure_columns(engine) -> None:
         names = {column["name"] for column in inspector.get_columns("jobs")}
         if "line_id" not in names:
             statements.append("ALTER TABLE jobs ADD COLUMN line_id VARCHAR(32)")
+    if "characters" in tables:
+        names = {column["name"] for column in inspector.get_columns("characters")}
+        if "voice_locked" not in names:
+            statements.append("ALTER TABLE characters ADD COLUMN voice_locked BOOLEAN DEFAULT 0 NOT NULL")
+        if "gender" not in names:
+            statements.append("ALTER TABLE characters ADD COLUMN gender VARCHAR(20) DEFAULT '' NOT NULL")
+        if "age" not in names:
+            statements.append("ALTER TABLE characters ADD COLUMN age VARCHAR(20) DEFAULT '' NOT NULL")
+        if "personality" not in names:
+            statements.append("ALTER TABLE characters ADD COLUMN personality VARCHAR(20) DEFAULT '' NOT NULL")
+    if "script_lines" in tables:
+        names = {column["name"] for column in inspector.get_columns("script_lines")}
+        if "start_sec" not in names:
+            statements.append("ALTER TABLE script_lines ADD COLUMN start_sec FLOAT")
     if "scenes" in tables:
         names = {column["name"] for column in inspector.get_columns("scenes")}
         if "source_url" not in names:
