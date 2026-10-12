@@ -383,8 +383,10 @@ function renderEpisode() {
       <aside class="stack">
         <section class="panel">
           <h3>成片</h3>
-          ${episode.video_url ? `<video controls src="${esc(episode.video_url)}?t=${stamp}"></video>` : `<div class="empty">合成之后可以在这里播放。</div>`}
-          ${episode.audio_url ? `<audio controls src="${esc(episode.audio_url)}?t=${stamp}" style="margin-top:8px"></audio>` : ""}
+          <div id="cut">
+            ${episode.video_url ? `<video controls src="${esc(episode.video_url)}?t=${stamp}"></video>` : `<div class="empty">合成之后可以在这里播放。</div>`}
+            ${episode.audio_url ? `<audio controls src="${esc(episode.audio_url)}?t=${stamp}" style="margin-top:8px"></audio>` : ""}
+          </div>
         </section>
         <section class="panel">
           <h3>场景</h3>
@@ -472,10 +474,29 @@ async function saveLine(id, root) {
   const text = root.querySelector('[data-field="text"]').value.trim();
   if (!text) return;
   try {
-    state.episode = await api(`/api/lines/${id}`, { method: "PATCH", body: { speaker, text } });
+    const episode = await api(`/api/lines/${id}`, { method: "PATCH", body: { speaker, text } });
+    state.episode = episode;
+    markCutStale(episode, id);
   } catch (error) {
     state.error = error.message;
     renderEpisode();
+  }
+}
+
+function markCutStale(episode, lineId) {
+  const cut = document.querySelector("#cut");
+  if (cut && !episode.video_url) {
+    cut.innerHTML = `<div class="empty">台词已改，原来的成片作废了。重新生成配音后再合成视频。</div>`;
+  }
+  const line = (episode.lines || []).find((item) => item.id === lineId);
+  const card = document.querySelector(`[data-line="${lineId}"] audio`);
+  if (card && (!line || !line.audio_url)) card.remove();
+  const chips = document.querySelectorAll(".chips .chip");
+  if (chips.length >= 4) {
+    chips[1].textContent = `配音 ${episode.voiced_count}/${episode.line_count}`;
+    chips[1].classList.toggle("on", episode.voiced_count === episode.line_count && episode.line_count > 0);
+    chips[3].textContent = episode.has_video ? "已成片" : "未成片";
+    chips[3].classList.toggle("on", episode.has_video);
   }
 }
 

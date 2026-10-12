@@ -173,8 +173,8 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
         close_provider(image_provider)
     with session_scope(session_factory) as db:
         episode = _episode(db, episode_id)
+        # 旧图已经在写出新文件前被删掉。这里不能再按原路径删除，否则会把刚生成的同名图片清掉。
         for scene in list(episode.scenes):
-            remove_stored(settings, scene.image_path)
             db.delete(scene)
         db.flush()
         for index, (scene, dest) in enumerate(rendered):

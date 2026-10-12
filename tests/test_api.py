@@ -63,6 +63,12 @@ def test_mock_pipeline_renders_video(client, app):
     assert any("风更紧了" in line["text"] for line in episode["lines"])
     assert "角色外观必须保持一致" in episode["scenes"][0]["prompt"]
 
+    again = client.post(f"/api/episodes/{episode_id}/pipeline")
+    assert again.status_code == 200
+    assert again.json()["status"] == "succeeded", again.json().get("error")
+    episode = client.get(f"/api/episodes/{episode_id}").json()
+    assert episode["has_video"] is True
+
     video = client.get(episode["video_url"])
     assert video.status_code == 200
     assert video.headers["content-type"].startswith("video/mp4")
