@@ -12,7 +12,12 @@ def test_health_and_mock_config(client):
     assert health.json()["ffmpeg"] is True
     config = client.get("/api/config").json()
     assert config["app_mode"] == "mock"
+    assert config["llm_provider"] == "mock"
     assert config["tts_provider"] == "mock"
+    assert config["image_provider"] == "mock"
+    assert config["llm_configured"] is False
+    assert config["moss_configured"] is False
+    assert config["image_configured"] is False
     voices = client.get("/api/voices").json()
     assert any(voice["name"] == "故宫纪录片" for voice in voices["voices"])
 

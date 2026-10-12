@@ -43,6 +43,35 @@ def test_deepseek_default_model_is_v41_flash(tmp_path):
     assert settings.resolved_llm_model() == "deepseek-flash"
 
 
+def test_blank_keys_override_ambient_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("MOSI_API_KEY", "ambient-mosi")
+    monkeypatch.setenv("MOSS_API_KEY", "ambient-moss")
+    monkeypatch.setenv("IMAGE_API_KEY", "ambient-image")
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-deepseek")
+    monkeypatch.setenv("TTS_PROVIDER", "mosi")
+    monkeypatch.setenv("IMAGE_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    settings = Settings(
+        app_mode="mock",
+        llm_provider="mock",
+        tts_provider="mock",
+        image_provider="mock",
+        mosi_api_key="",
+        moss_api_key="",
+        image_api_key="",
+        openai_api_key="",
+        deepseek_api_key="",
+        data_dir=str(tmp_path),
+    )
+    assert settings.resolved_llm() == "mock"
+    assert settings.resolved_tts() == "mock"
+    assert settings.resolved_image() == "mock"
+    assert settings.resolved_mosi_key() == ""
+    assert settings.resolved_llm_key() == ""
+    assert settings.image_api_key == ""
+
+
 def test_deepseek_requires_key(tmp_path):
     settings = Settings(
         llm_provider="deepseek",
