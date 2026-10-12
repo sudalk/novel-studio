@@ -44,6 +44,9 @@ def test_scenes_cover_every_line():
     assert scenes[-1]["end_line"] == len(draft["lines"]) - 1
     assert "角色外观必须保持一致" in scenes[0]["prompt"]
     assert "林晚" in scenes[0]["prompt"]
+    assert "STYLE" in scenes[0]["prompt"]
+    assert "不要水印" in scenes[0]["prompt"]
+    assert "不要乱码" in scenes[0]["prompt"]
 
 
 def test_loose_json_fence():

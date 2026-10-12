@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.api.routes import router
 from app.config import Settings, get_settings
-from app.database import Base, make_engine, make_session_factory
+from app.database import Base, ensure_columns, make_engine, make_session_factory
 from app.paths import sqlite_file
 from app.services.jobs import JobRunner
 
@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_file.parent.mkdir(parents=True, exist_ok=True)
     engine = make_engine(settings.database_url)
     Base.metadata.create_all(engine)
+    ensure_columns(engine)
     session_factory = make_session_factory(engine)
 
     app = FastAPI(title="章映", version=__version__, lifespan=lifespan)

@@ -89,18 +89,8 @@ def _scene_from_lines(lines: list[dict], looks: dict, start: int, end: int) -> d
             speakers.append(name)
     who = "、".join(speakers) if speakers else "环境"
     summary = f"{who}。{excerpt[:42]}"
-    look_bits = []
-    for name in speakers:
-        desc = looks.get(name) or stable_appearance(name)
-        look_bits.append(f"{name}：{desc}")
-    look_text = "；".join(look_bits) if look_bits else "以环境和光影为主，不出现需要保持一致的新角色"
-    prompt = (
-        "电影感插画，16:9，统一画风：暖色写实，柔和侧光，淡彩质感。"
-        f"角色外观必须保持一致：{look_text}。"
-        f"画面：{summary}。"
-        "不要文字，不要水印，不要分镜格。"
-    )
-    return {"start_line": start, "end_line": end, "summary": summary, "prompt": prompt}
+    del looks
+    return {"start_line": start, "end_line": end, "summary": summary, "prompt": summary}
 
 
 def _paragraphs(text: str) -> list[str]:

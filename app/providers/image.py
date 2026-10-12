@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import logging
+import time
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont
@@ -8,6 +10,8 @@ from app.config import Settings
 from app.fonts import find_cjk_font
 from app.providers.errors import ProviderError
 
+logger = logging.getLogger(__name__)
+
 
 class MockImageProvider:
     name = "mock"
@@ -15,7 +19,7 @@ class MockImageProvider:
     def close(self) -> None:
         return None
 
-    def generate(self, prompt: str, dest, width: int, height: int) -> None:
+    def generate(self, prompt: str, dest, width: int, height: int) -> str | None:
         width = max(320, width - (width % 2))
         height = max(180, height - (height % 2))
         digest = hashlib.sha256(prompt.encode("utf-8")).digest()
@@ -52,57 +56,110 @@ class MockImageProvider:
             y += int(height * 0.08)
         dest.parent.mkdir(parents=True, exist_ok=True)
         image.save(dest, format="PNG")
+        return None
+
+
+class ImageRequestError(ProviderError):
+    """可以再试一次的图像失败。"""
 
 
 class OpenAIImageProvider:
-    """OpenAI 兼容的 images/generations。"""
+    """OpenAI 兼容的 images/generations，默认打到图像中转。"""
 
     name = "openai"
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+    def __init__(self, settings: Settings, client: httpx.Client | None = None, sleep=time.sleep):
         self.settings = settings
-        self._client = client or httpx.Client(timeout=httpx.Timeout(180.0, connect=15.0), follow_redirects=True)
+        self._sleep = sleep
+        timeout = httpx.Timeout(settings.image_timeout_sec, connect=30.0)
+        self._client = client or httpx.Client(timeout=timeout, follow_redirects=True)
         self._owns_client = client is None
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
-    def generate(self, prompt: str, dest, width: int, height: int) -> None:
+    def generate(self, prompt: str, dest, width: int, height: int) -> str | None:
         del width, height
-        key = self.settings.image_api_key or self.settings.openai_api_key
-        base = (self.settings.image_base_url or self.settings.openai_base_url).rstrip("/")
+        attempts = max(1, int(self.settings.image_max_attempts))
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._once(prompt, dest)
+            except ImageRequestError as exc:
+                last = exc
+                if attempt >= attempts:
+                    break
+                wait = self.settings.image_retry_wait_sec
+                logger.warning("图像第 %s/%s 次失败，%.0f 秒后重试：%s", attempt, attempts, wait, exc)
+                if wait > 0:
+                    self._sleep(wait)
+        raise ProviderError(f"图像生成失败，已试 {attempts} 次：{last}") from last
+
+    def _once(self, prompt: str, dest) -> str | None:
+        key = self.settings.image_api_key.strip()
         if not key:
-            raise ProviderError("未配置 IMAGE_API_KEY 或 OPENAI_API_KEY")
-        url = base + "/images/generations"
+            raise ProviderError("未配置 IMAGE_API_KEY")
+        try:
+            size = self.settings.resolved_image_size()
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
+        url = self.settings.resolved_image_base_url() + "/images/generations"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": self.settings.image_model,
+            "model": self.settings.resolved_image_model(),
             "prompt": prompt,
-            "size": self.settings.image_size,
+            "size": size,
             "response_format": "b64_json",
         }
-        response = self._client.post(url, headers=headers, json=payload)
-        if response.status_code == 400:
-            payload.pop("response_format", None)
-            response = self._client.post(url, headers=headers, json=payload)
+        response = self._post(url, headers, payload)
+        if response.status_code == 400 and "response_format" in payload:
+            payload.pop("response_format")
+            response = self._post(url, headers, payload)
+        if response.status_code == 429 or response.status_code >= 500:
+            raise ImageRequestError(f"图像请求失败（{response.status_code}）：{response.text[:300]}")
         if response.status_code >= 400:
-            raise ProviderError(f"图像请求失败（{response.status_code}）：{response.text[:400]}")
+            raise ProviderError(f"图像请求失败（{response.status_code}）：{response.text[:300]}")
         try:
             item = response.json()["data"][0]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ProviderError("图像接口没有返回图片") from exc
+            raise ImageRequestError("图像接口没有返回图片") from exc
+        source = item.get("url") or None
         if item.get("b64_json"):
-            raw = base64.b64decode(item["b64_json"])
-        elif item.get("url"):
-            downloaded = self._client.get(item["url"])
-            if downloaded.status_code >= 400 or not downloaded.content:
-                raise ProviderError("图像地址无法下载")
-            raw = downloaded.content
+            try:
+                raw = base64.b64decode(item["b64_json"])
+            except (ValueError, TypeError) as exc:
+                raise ImageRequestError("图像数据无法解码") from exc
+        elif source:
+            raw = self._download(source)
         else:
-            raise ProviderError("图像接口没有返回图片")
+            raise ImageRequestError("图像接口没有返回图片")
+        if not raw:
+            raise ImageRequestError("图像内容是空的")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(raw)
+        return source
+
+    def _post(self, url: str, headers: dict, payload: dict) -> httpx.Response:
+        try:
+            return self._client.post(url, headers=headers, json=payload)
+        except httpx.TimeoutException as exc:
+            raise ImageRequestError("图像请求超时") from exc
+        except httpx.TransportError as exc:
+            raise ImageRequestError(f"图像请求失败：{exc}") from exc
+
+    def _download(self, url: str) -> bytes:
+        try:
+            downloaded = self._client.get(url)
+        except httpx.TimeoutException as exc:
+            raise ImageRequestError("图像地址下载超时") from exc
+        except httpx.TransportError as exc:
+            raise ImageRequestError(f"图像地址无法下载：{exc}") from exc
+        if downloaded.status_code >= 500 or downloaded.status_code == 429:
+            raise ImageRequestError(f"图像地址无法下载（{downloaded.status_code}）")
+        if downloaded.status_code >= 400 or not downloaded.content:
+            raise ProviderError("图像地址无法下载")
+        return downloaded.content
 
 
 def _load_font(size: int):

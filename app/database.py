@@ -2,7 +2,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
@@ -34,6 +34,30 @@ def make_engine(url: str):
             cursor.close()
 
     return engine
+
+
+def ensure_columns(engine) -> None:
+    """给已经建好的 SQLite 补上后加的列。新库由 create_all 建齐。"""
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    statements: list[str] = []
+    if "novels" in tables:
+        names = {column["name"] for column in inspector.get_columns("novels")}
+        if "style" not in names:
+            statements.append("ALTER TABLE novels ADD COLUMN style TEXT DEFAULT '' NOT NULL")
+    if "jobs" in tables:
+        names = {column["name"] for column in inspector.get_columns("jobs")}
+        if "line_id" not in names:
+            statements.append("ALTER TABLE jobs ADD COLUMN line_id VARCHAR(32)")
+    if "scenes" in tables:
+        names = {column["name"] for column in inspector.get_columns("scenes")}
+        if "source_url" not in names:
+            statements.append("ALTER TABLE scenes ADD COLUMN source_url VARCHAR(1000)")
+    if not statements:
+        return
+    with engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))
 
 
 def make_session_factory(engine):

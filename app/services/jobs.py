@@ -4,7 +4,7 @@ import threading
 from app.config import Settings
 from app.database import utcnow
 from app.models import Episode, Job
-from app.services.pipeline import run_breakdown, run_illustrate, run_pipeline, run_tts, run_video
+from app.services.pipeline import run_breakdown, run_illustrate, run_line_tts, run_pipeline, run_tts, run_video
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ def execute_job(job_id: str, session_factory, settings: Settings) -> None:
             return
         kind = job.kind
         episode_id = job.episode_id
+        line_id = job.line_id
         job.status = "running"
         job.updated_at = utcnow()
         db.commit()
@@ -95,10 +96,15 @@ def execute_job(job_id: str, session_factory, settings: Settings) -> None:
     try:
         if not episode_id:
             raise RuntimeError("任务没有绑定分集")
-        runner = _RUNNERS.get(kind)
-        if runner is None:
-            raise RuntimeError(f"未知任务：{kind}")
-        runner(session_factory, settings, episode_id, progress)
+        if kind == "line-tts":
+            if not line_id:
+                raise RuntimeError("没有指定要重配的台词")
+            run_line_tts(session_factory, settings, episode_id, line_id, progress)
+        else:
+            runner = _RUNNERS.get(kind)
+            if runner is None:
+                raise RuntimeError(f"未知任务：{kind}")
+            runner(session_factory, settings, episode_id, progress)
     except Exception as exc:
         logger.exception("任务 %s 失败", job_id)
         session = session_factory()

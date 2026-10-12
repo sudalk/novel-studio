@@ -99,11 +99,15 @@ pytest
 | `OPENAI_API_KEY` | 文本模型密钥。OpenAI 兼容接口。 |
 | `OPENAI_BASE_URL` | 默认 `https://api.openai.com/v1` |
 | `LLM_MODEL` | 默认 `gpt-4o-mini` |
-| `IMAGE_API_KEY` | 图像密钥。空则沿用 `OPENAI_API_KEY`。 |
-| `IMAGE_BASE_URL` | 图像接口根地址。空则沿用 `OPENAI_BASE_URL`。 |
-| `IMAGE_MODEL` | 默认 `dall-e-3` |
-| `IMAGE_SIZE` | 默认 `1792x1024` |
-| `MOSS_API_KEY` | MOSI 密钥 |
+| `IMAGE_API_KEY` | 图像密钥。只放在环境变量里，不要提交。 |
+| `IMAGE_BASE_URL` | 默认 `https://api.aicoming.top/v1`，OpenAI 兼容的 images/generations。 |
+| `IMAGE_MODEL` | 默认 `gpt-image-2.5-flare`。备选 `gpt-image-2-2k`。 |
+| `IMAGE_ASPECT` | 默认 `16:9`。竖屏用 `9:16`。尺寸见下方图像一节。 |
+| `IMAGE_SIZE` | 留空则按画幅映射。填写后覆盖映射。 |
+| `IMAGE_TIMEOUT_SEC` | 单张超时，默认 300，建议 180–600。 |
+| `IMAGE_GAP_SEC` | 两张图之间的间隔，默认 12。mock 不等待。 |
+| `IMAGE_MAX_ATTEMPTS` / `IMAGE_RETRY_WAIT_SEC` | 失败或超时最多 6 次，间隔默认 48 秒。 |
+| `MOSI_API_KEY` | MOSI 密钥。旧名 `MOSS_API_KEY` 仍可用。 |
 | `MOSS_BASE_URL` | 默认 `https://api.mosi.cn` |
 | `MOSS_MODEL` | 默认 `moss-ttsd-1.0` |
 | `MOSS_RESPONSE_FORMAT` | 默认 `wav`。也可用文档里的 mp3、pcm、flac、aac、opus。 |
@@ -114,21 +118,43 @@ pytest
 真实模式至少需要：
 
 - 拆剧本和分镜：`OPENAI_API_KEY`（或兼容服务的密钥和 `OPENAI_BASE_URL`）
-- 配音：`MOSS_API_KEY`。音色 ID 从 `GET /v1/audio/voices` 读取，也可以在角色上粘贴。
-- 插画：`IMAGE_API_KEY` 或 `OPENAI_API_KEY`
+- 配音：`MOSI_API_KEY`。音色从 `GET /v1/audio/voices` 拉取，旁白和每个角色各选一把，也可以粘贴 `voice_id`。
+- 插画：`IMAGE_API_KEY`，接口是 `IMAGE_BASE_URL` 上的 images/generations。
 
-可以只把某一段换成真实接口。例如保持 `APP_MODE=mock`，再设 `TTS_PROVIDER=mosi` 和 `MOSS_API_KEY`，剧本和画面仍走离线，只有配音打到 MOSI。
+可以只把某一段换成真实接口。例如保持 `APP_MODE=mock`，再设 `TTS_PROVIDER=mosi` 和 `MOSI_API_KEY`，剧本和画面仍走离线，只有配音打到 MOSI。
 
 ## MOSI 多人语音
 
 实现遵循 [多人语音生成](https://platform.mosi.cn/docs/scenarios/dialogue)：
 
 - `POST https://api.mosi.cn/v1/audio/speech/speakers`
-- 请求头：`Authorization: Bearer $MOSS_API_KEY`、`Platform: moss-platform`
+- 请求头：`Authorization: Bearer $MOSI_API_KEY`、`Platform: moss-platform`
 - 模型：`moss-ttsd-1.0`
 - `speakers[]` 给出说话人 id 和 `voice_id`
 - `segments[]` 按顺序给出 `speaker` 和 `text`
 - `delivery_method=url` 时读取响应里的 `url`；`audio` 时直接保存音频
 - 请求体带 `async=true` 时，用返回的 `task_id` 轮询 `GET /v1/audio/tasks/{task_id}`，成功后下载 `url`
 
-每一句单独作为一段提交，是为了拿到这一句的时长，字幕才能对准。小说里的角色往往超过两位，而这个模型面向双人对话；逐句调用只带当前这一个说话人，再由 ffmpeg 拼成一集。密钥只放在环境变量里，不要写进前端。
+每一句单独作为一段提交，是为了拿到这一句的时长，字幕才能对准。小说里的角色往往超过两位，而这个模型面向双人对话；逐句调用只带当前这一个说话人，再由 ffmpeg 拼成一集。同一集里两句之间默认停 1.5 秒（`MOSS_GAP_SEC`）。429、5xx 和超时会重试，最多 `MOSS_MAX_ATTEMPTS` 次（默认 4）；响应里有 `Retry-After` 就按它等，否则等 `MOSS_RETRY_WAIT_SEC`（默认 8 秒）。
+
+音色在分集工作台右侧的「音色设置」里选。旁白和每个角色各有一把音色，可以试听，也可以粘贴 `voice_id`。每一句旁边的「重配」只重做这一句，然后重新拼接整集音频；成片会作废，需要再合成视频。密钥只放在环境变量里，不要写进前端。
+
+## 图像
+
+`IMAGE_PROVIDER=openai` 调用 `{IMAGE_BASE_URL}/images/generations`。默认地址是 `https://api.aicoming.top/v1`，默认模型 `gpt-image-2.5-flare`，也可以改成 `gpt-image-2-2k`。
+
+画幅和尺寸：
+
+| 画幅 | 尺寸 |
+| --- | --- |
+| 1:1 | 1024x1024 |
+| 16:9 | 1792x1024 |
+| 9:16 | 1024x1792 |
+| 4:3 | 1792x1344 |
+| 3:4 | 1344x1792 |
+
+成片默认 16:9。竖屏把 `IMAGE_ASPECT` 设为 `9:16`，并改 `VIDEO_WIDTH` / `VIDEO_HEIGHT`。`IMAGE_SIZE` 留空时用上表；写了就覆盖画幅。
+
+同一集的图串行生成，两张之间默认隔 12 秒。单次超时默认 300 秒。失败或超时最多试 6 次，两次之间默认等 48 秒。
+
+最终提示词由四段拼成：这一镜的画面、整部作品可编辑的 STYLE、每个角色的外观，以及共用的 COMMON 约束（构图完整，不要水印、标志、签名，不要无关文字和乱码，不要元数据和页脚）。STYLE 在作品页的「画面风格」里改。图片写在 `data/novels/.../scenes/`，接口同时返回本地路径和上游给的 `source_url`。

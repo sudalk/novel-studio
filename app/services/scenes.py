@@ -2,10 +2,11 @@ import json
 
 from app.providers.errors import ProviderError
 from app.services.heuristics import stable_appearance
+from app.services.image_prompt import compose_image_prompt
 from app.services.prompts import SCENE_SYSTEM
 
 
-def plan_scenes(lines: list[dict], characters: list[dict], llm) -> list[dict]:
+def plan_scenes(lines: list[dict], characters: list[dict], llm, style: str = "", aspect: str = "16:9") -> list[dict]:
     payload = {
         "characters": [
             {"name": item["name"], "description": item.get("description") or ""}
@@ -19,9 +20,9 @@ def plan_scenes(lines: list[dict], characters: list[dict], llm) -> list[dict]:
     }
     data = llm.complete_json(SCENE_SYSTEM, json.dumps(payload, ensure_ascii=False))
     scenes = normalize_scenes(data, len(lines))
-    looks = {item["name"]: item.get("description") or "" for item in characters}
+    looks = {item["name"]: (item.get("description") or "").strip() or stable_appearance(item["name"]) for item in characters}
     for scene in scenes:
-        scene["prompt"] = ensure_consistent_prompt(scene["prompt"], scene["summary"], looks)
+        scene["prompt"] = compose_image_prompt(scene["prompt"], style, looks, aspect)
     return scenes
 
 
@@ -64,19 +65,3 @@ def normalize_scenes(data: dict, line_count: int) -> list[dict]:
     return scenes
 
 
-def ensure_consistent_prompt(prompt: str, summary: str, looks: dict[str, str]) -> str:
-    if "角色外观必须保持一致" in prompt:
-        return prompt
-    bits = []
-    for name, description in looks.items():
-        if name == "旁白":
-            continue
-        bits.append(f"{name}：{description or stable_appearance(name)}")
-    look_text = "；".join(bits) if bits else "以环境和光影为主"
-    body = prompt.strip() or summary
-    return (
-        "电影感插画，16:9，统一画风：暖色写实，柔和侧光，淡彩质感。"
-        f"角色外观必须保持一致：{look_text}。"
-        f"画面：{body}。"
-        "不要文字，不要水印，不要分镜格。"
-    )

@@ -25,16 +25,25 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
 
     image_api_key: str = ""
-    image_base_url: str = ""
-    image_model: str = "dall-e-3"
-    image_size: str = "1792x1024"
+    image_base_url: str = "https://api.aicoming.top/v1"
+    image_model: str = "gpt-image-2.5-flare"
+    image_aspect: str = "16:9"
+    image_size: str = ""
+    image_timeout_sec: float = 300
+    image_gap_sec: float = 12
+    image_max_attempts: int = 6
+    image_retry_wait_sec: float = 48
 
+    mosi_api_key: str = ""
     moss_api_key: str = ""
     moss_base_url: str = "https://api.mosi.cn"
     moss_model: str = "moss-ttsd-1.0"
     moss_response_format: str = "wav"
     moss_delivery_method: str = "url"
     moss_async: str = "auto"
+    moss_gap_sec: float = 1.5
+    moss_max_attempts: int = 4
+    moss_retry_wait_sec: float = 8
 
     video_width: int = 1280
     video_height: int = 720
@@ -62,8 +71,29 @@ class Settings(BaseSettings):
     def resolved_tts(self) -> str:
         return self._resolve(self.tts_provider, "mosi")
 
+    def resolved_mosi_key(self) -> str:
+        return (self.mosi_api_key or self.moss_api_key).strip()
+
     def resolved_image(self) -> str:
         return self._resolve(self.image_provider, "openai")
+
+    def resolved_image_base_url(self) -> str:
+        return (self.image_base_url or "https://api.aicoming.top/v1").rstrip("/")
+
+    def resolved_image_model(self) -> str:
+        return (self.image_model or "gpt-image-2.5-flare").strip()
+
+    def resolved_image_aspect(self) -> str:
+        aspect = (self.image_aspect or "16:9").strip().replace("：", ":")
+        return aspect or "16:9"
+
+    def resolved_image_size(self) -> str:
+        from app.services.image_prompt import size_for_aspect
+
+        explicit = (self.image_size or "").strip().lower().replace("×", "x").replace(" ", "")
+        if explicit:
+            return explicit
+        return size_for_aspect(self.resolved_image_aspect())
 
     def _resolve(self, explicit: str, live_default: str) -> str:
         if explicit and explicit.strip():

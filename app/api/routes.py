@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.providers.errors import ProviderError
 from app.providers.factory import build_tts, close_provider
 from app.providers.voices import PRESET_VOICES, assign_default_voice
 from app.services.heuristics import stable_appearance
+from app.services.image_prompt import DEFAULT_STYLE
 from app.services.importer import create_novel, decode_bytes
 from app.services.jobs import execute_job
 from app.services.pipeline import drop_scenes, invalidate_after_line_edit
@@ -34,6 +35,10 @@ def get_db(request: Request):
 class NovelIn(BaseModel):
     title: str | None = None
     text: str = Field(min_length=1, max_length=2_000_000)
+
+
+class NovelPatch(BaseModel):
+    style: str | None = Field(default=None, max_length=4000)
 
 
 class CharacterIn(BaseModel):
@@ -62,6 +67,11 @@ class LinePatch(BaseModel):
 
 class MoveIn(BaseModel):
     direction: str
+
+
+class PreviewIn(BaseModel):
+    voice_id: str = Field(min_length=1, max_length=80)
+    text: str = ""
 
 
 def _settings(request: Request):
@@ -102,6 +112,7 @@ def _job_out(job: Job) -> dict:
         "novel_id": job.novel_id,
         "episode_id": job.episode_id,
         "kind": job.kind,
+        "line_id": job.line_id,
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
@@ -142,6 +153,8 @@ def _scene_out(scene) -> dict:
         "end_line": scene.end_line,
         "summary": scene.summary,
         "prompt": scene.prompt,
+        "image_path": scene.image_path,
+        "source_url": scene.source_url,
         "image_url": f"/api/media/scenes/{scene.id}/image" if scene.image_path else None,
     }
 
@@ -191,6 +204,8 @@ def _novel_out(novel: Novel) -> dict:
         "updated_at": novel.updated_at,
         "episode_count": len(novel.episodes),
         "character_count": len(novel.characters),
+        "style": novel.style or "",
+        "style_default": DEFAULT_STYLE,
         "episodes": [_episode_summary(episode) for episode in novel.episodes],
         "characters": [_character_out(character) for character in _ordered_characters(novel)],
     }
@@ -200,7 +215,7 @@ def _ordered_characters(novel: Novel) -> list[Character]:
     return sorted(novel.characters, key=lambda item: (not item.is_narrator, item.created_at))
 
 
-def _launch(request: Request, db: Session, episode: Episode, kind: str) -> dict:
+def _launch(request: Request, db: Session, episode: Episode, kind: str, line_id: str | None = None) -> dict:
     settings = _settings(request)
     active = (
         db.query(Job)
@@ -214,6 +229,7 @@ def _launch(request: Request, db: Session, episode: Episode, kind: str) -> dict:
         novel_id=episode.novel_id,
         episode_id=episode.id,
         kind=kind,
+        line_id=line_id,
         status="queued",
         progress=0,
         message="排队中",
@@ -284,8 +300,11 @@ def config(request: Request):
         "tts_provider": settings.resolved_tts(),
         "image_provider": settings.resolved_image(),
         "llm_configured": bool(settings.openai_api_key),
-        "image_configured": bool(settings.image_api_key or settings.openai_api_key),
-        "moss_configured": bool(settings.moss_api_key),
+        "image_configured": bool(settings.image_api_key.strip()),
+        "image_model": settings.resolved_image_model(),
+        "image_aspect": settings.resolved_image_aspect(),
+        "moss_configured": bool(settings.resolved_mosi_key()),
+        "moss_model": settings.moss_model,
         "ffmpeg": shutil.which("ffmpeg") is not None,
     }
 
@@ -312,13 +331,26 @@ def voices(request: Request):
     examples = []
     if provider.name != "mock":
         examples = [
-            {"id": voice.id, "name": voice.name, "description": voice.description, "language": voice.language}
+            {
+                "id": voice.id,
+                "name": voice.name,
+                "description": voice.description,
+                "language": voice.language,
+                "preview_url": voice.preview_url,
+            }
             for voice in PRESET_VOICES
         ]
     return {
         "provider": provider.name,
+        "model": settings.moss_model if provider.name == "mosi" else "",
         "voices": [
-            {"id": voice.id, "name": voice.name, "description": voice.description, "language": voice.language}
+            {
+                "id": voice.id,
+                "name": voice.name,
+                "description": voice.description,
+                "language": voice.language,
+                "preview_url": voice.preview_url,
+            }
             for voice in listed
         ],
         "examples": examples,
@@ -366,6 +398,17 @@ async def upload_novel(
 @router.get("/api/novels/{novel_id}")
 def get_novel(novel_id: str, db: Session = Depends(get_db)):
     return _novel_out(_novel(db, novel_id))
+
+
+@router.patch("/api/novels/{novel_id}")
+def patch_novel(novel_id: str, payload: NovelPatch, db: Session = Depends(get_db)):
+    novel = _novel(db, novel_id)
+    if payload.style is not None:
+        novel.style = payload.style.strip()
+    novel.updated_at = utcnow()
+    db.commit()
+    db.refresh(novel)
+    return _novel_out(novel)
 
 
 @router.delete("/api/novels/{novel_id}")
@@ -558,6 +601,38 @@ router.add_api_route("/api/episodes/{episode_id}/tts", _job_route("tts"), method
 router.add_api_route("/api/episodes/{episode_id}/illustrate", _job_route("illustrate"), methods=["POST"])
 router.add_api_route("/api/episodes/{episode_id}/video", _job_route("video"), methods=["POST"])
 router.add_api_route("/api/episodes/{episode_id}/pipeline", _job_route("pipeline"), methods=["POST"])
+
+
+@router.post("/api/lines/{line_id}/tts")
+def resynth_line(line_id: str, request: Request, db: Session = Depends(get_db)):
+    line = _line(db, line_id)
+    return _launch(request, db, line.episode, "line-tts", line_id=line.id)
+
+
+@router.post("/api/voices/preview")
+def preview_voice(payload: PreviewIn, request: Request):
+    voice_id = payload.voice_id.strip()
+    text = payload.text.strip() or "你好，这是一段音色试听。"
+    if len(text) > 80:
+        text = text[:80]
+    settings = _settings(request)
+    dest = settings.data_path / "previews" / f"{new_id()}.wav"
+    provider = build_tts(settings)
+    try:
+        from app.providers.tts import SynthRequest
+        from app.services.audio import normalize_wav
+
+        provider.synthesize_line(SynthRequest("preview", "试听", voice_id, text), dest)
+        normalized = dest.with_suffix(".norm.wav")
+        normalize_wav(dest, normalized)
+        data = normalized.read_bytes()
+    except ProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    finally:
+        close_provider(provider)
+        dest.unlink(missing_ok=True)
+        dest.with_suffix(".norm.wav").unlink(missing_ok=True)
+    return Response(content=data, media_type="audio/wav")
 
 
 @router.get("/api/jobs/{job_id}")

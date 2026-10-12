@@ -1,5 +1,6 @@
 import logging
 import shutil
+import time
 
 from app.config import Settings
 from app.database import new_id, session_scope, utcnow
@@ -11,6 +12,7 @@ from app.providers.tts import SynthRequest
 from app.providers.voices import assign_default_voice
 from app.services.audio import normalize_wav, stitch_wavs
 from app.services.heuristics import stable_appearance
+from app.services.image_prompt import inter_image_pause
 from app.services.scenes import plan_scenes
 from app.services.script import breakdown_text, line_kind
 from app.services.video import compose_episode
@@ -102,6 +104,9 @@ def run_tts(session_factory, settings: Settings, episode_id: str, progress) -> N
         line_dir = work / "lines"
         line_dir.mkdir(parents=True, exist_ok=True)
         for index, item in enumerate(plan):
+            if index and tts.name != "mock" and settings.moss_gap_sec > 0:
+                progress(10 + int(70 * index / max(len(plan), 1)), f"等待 {settings.moss_gap_sec:.0f} 秒后合成下一句")
+                time.sleep(settings.moss_gap_sec)
             progress(10 + int(70 * index / max(len(plan), 1)), f"正在合成第 {index + 1}/{len(plan)} 句")
             raw = line_dir / f"{item['line_id']}.raw"
             wav = line_dir / f"{item['line_id']}.wav"
@@ -136,6 +141,66 @@ def run_tts(session_factory, settings: Settings, episode_id: str, progress) -> N
         episode.updated_at = utcnow()
 
 
+def run_line_tts(session_factory, settings: Settings, episode_id: str, line_id: str, progress) -> None:
+    with session_scope(session_factory) as db:
+        episode = _episode(db, episode_id)
+        line = next((item for item in episode.lines if item.id == line_id), None)
+        if line is None:
+            raise RuntimeError("台词不存在")
+        character = next((item for item in episode.novel.characters if item.name == line.speaker), None)
+        if character is None or not character.voice_id:
+            raise RuntimeError(f"角色「{line.speaker}」还没有音色")
+        work = episode_dir(settings, episode.novel_id, episode.id)
+        text = line.text
+        voice_id = character.voice_id
+        speaker = line.speaker
+        character_id = character.id
+    progress(20, "正在重配这一句")
+    tts = build_tts(settings)
+    try:
+        line_dir = work / "lines"
+        line_dir.mkdir(parents=True, exist_ok=True)
+        raw = line_dir / f"{line_id}.raw"
+        wav = line_dir / f"{line_id}.wav"
+        tts.synthesize_line(SynthRequest(character_id, speaker, voice_id, text), raw)
+        normalize_wav(raw, wav)
+        if raw.exists() and raw.resolve() != wav.resolve():
+            raw.unlink()
+        duration = probe_duration(wav)
+    finally:
+        close_provider(tts)
+    progress(80, "正在更新整集配音")
+    with session_scope(session_factory) as db:
+        episode = _episode(db, episode_id)
+        line = next((item for item in episode.lines if item.id == line_id), None)
+        if line is None:
+            raise RuntimeError("台词不存在")
+        line.audio_path = to_rel(settings, wav)
+        line.duration_sec = duration
+        remove_stored(settings, episode.audio_path)
+        remove_stored(settings, episode.video_path)
+        remove_stored(settings, episode.subtitle_path)
+        episode.audio_path = None
+        episode.video_path = None
+        episode.subtitle_path = None
+        lines = list(episode.lines)
+        if lines and all(item.audio_path and item.duration_sec for item in lines):
+            paths = []
+            for item in lines:
+                resolved = from_rel(settings, item.audio_path)
+                if resolved is None or not resolved.is_file():
+                    paths = []
+                    break
+                paths.append(resolved)
+            if len(paths) == len(lines):
+                mix = work / "episode.wav"
+                stitch_wavs(paths, mix)
+                episode.audio_path = to_rel(settings, mix)
+        episode.status = _status(episode)
+        episode.error = None
+        episode.updated_at = utcnow()
+
+
 def run_illustrate(session_factory, settings: Settings, episode_id: str, progress) -> None:
     with session_scope(session_factory) as db:
         episode = _episode(db, episode_id)
@@ -150,25 +215,30 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
             {"name": character.name, "description": character.description} for character in episode.novel.characters
         ]
         novel_id = episode.novel_id
+        style = episode.novel.style or ""
         work = episode_dir(settings, novel_id, episode.id)
     progress(20, "正在划分场景")
     llm = build_llm(settings)
     try:
-        scenes = plan_scenes(line_payload, character_payload, llm)
+        scenes = plan_scenes(line_payload, character_payload, llm, style=style, aspect=settings.resolved_image_aspect())
     finally:
         close_provider(llm)
     image_provider = build_image(settings)
-    rendered: list[tuple[dict, object]] = []
+    rendered: list[tuple[dict, object, str | None]] = []
     try:
         scene_dir = work / "scenes"
         if scene_dir.exists():
             shutil.rmtree(scene_dir)
         scene_dir.mkdir(parents=True, exist_ok=True)
         for index, scene in enumerate(scenes):
+            pause = inter_image_pause(index, image_provider.name, settings.image_gap_sec)
+            if pause:
+                progress(30 + int(60 * index / max(len(scenes), 1)), f"等待 {pause:.0f} 秒后绘制下一张")
+                time.sleep(pause)
             progress(30 + int(60 * index / max(len(scenes), 1)), f"正在绘制场景 {index + 1}/{len(scenes)}")
             dest = scene_dir / f"{index:02d}.png"
-            image_provider.generate(scene["prompt"], dest, settings.video_width, settings.video_height)
-            rendered.append((scene, dest))
+            source_url = image_provider.generate(scene["prompt"], dest, settings.video_width, settings.video_height)
+            rendered.append((scene, dest, source_url))
     finally:
         close_provider(image_provider)
     with session_scope(session_factory) as db:
@@ -177,7 +247,7 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
         for scene in list(episode.scenes):
             db.delete(scene)
         db.flush()
-        for index, (scene, dest) in enumerate(rendered):
+        for index, (scene, dest, source_url) in enumerate(rendered):
             db.add(
                 Scene(
                     id=new_id(),
@@ -188,6 +258,7 @@ def run_illustrate(session_factory, settings: Settings, episode_id: str, progres
                     summary=scene["summary"],
                     prompt=scene["prompt"],
                     image_path=to_rel(settings, dest),
+                    source_url=source_url,
                 )
             )
         remove_stored(settings, episode.video_path)

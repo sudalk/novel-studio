@@ -63,6 +63,20 @@ def test_mock_pipeline_renders_video(client, app):
     assert any("风更紧了" in line["text"] for line in episode["lines"])
     assert "角色外观必须保持一致" in episode["scenes"][0]["prompt"]
 
+    preview = client.post("/api/voices/preview", json={"voice_id": "voice-lin-wan"})
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("audio/wav")
+    assert preview.content[:4] == b"RIFF"
+
+    first = episode["lines"][0]
+    regen = client.post(f"/api/lines/{first['id']}/tts")
+    assert regen.status_code == 200
+    assert regen.json()["status"] == "succeeded", regen.json().get("error")
+    episode = client.get(f"/api/episodes/{episode_id}").json()
+    assert episode["lines"][0]["audio_url"]
+    assert episode["audio_url"]
+    assert episode["has_video"] is False
+
     again = client.post(f"/api/episodes/{episode_id}/pipeline")
     assert again.status_code == 200
     assert again.json()["status"] == "succeeded", again.json().get("error")

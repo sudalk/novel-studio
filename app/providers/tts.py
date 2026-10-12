@@ -74,19 +74,27 @@ class MockTTS:
         write_tone(dest, duration, _tone_frequency(request.speaker_name or request.speaker_id))
 
 
+class RetryableTTS(ProviderError):
+    def __init__(self, message: str, wait: float | None = None):
+        super().__init__(message)
+        self.wait = wait
+
+
 class MosiTTSProvider:
     """MOSI 多人语音。
 
     按对话场景调用 POST /v1/audio/speech/speakers（模型 moss-ttsd-1.0）。
     每一句单独作为一段 segments 提交，从而得到可对齐字幕的时长，再由流水线拼接成一集。
     这样角色超过两位时也不会超出单次请求的说话人组合。
+    429 和 5xx 会按 Retry-After 或 MOSS_RETRY_WAIT_SEC 重试。
     文档：https://platform.mosi.cn/docs/scenarios/dialogue
     """
 
     name = "mosi"
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+    def __init__(self, settings: Settings, client: httpx.Client | None = None, sleep=time.sleep):
         self.settings = settings
+        self._sleep = sleep
         self._client = client or httpx.Client(timeout=httpx.Timeout(180.0, connect=15.0), follow_redirects=True)
         self._owns_client = client is None
 
@@ -98,15 +106,48 @@ class MosiTTSProvider:
         return self.settings.moss_base_url.rstrip("/")
 
     def _headers(self, json_body: bool = True) -> dict[str, str]:
-        if not self.settings.moss_api_key:
-            raise ProviderError("未配置 MOSS_API_KEY")
+        key = self.settings.resolved_mosi_key()
+        if not key:
+            raise ProviderError("未配置 MOSI_API_KEY")
         headers = {
-            "Authorization": f"Bearer {self.settings.moss_api_key}",
+            "Authorization": f"Bearer {key}",
             "Platform": "moss-platform",
         }
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
+
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        attempts = max(1, int(self.settings.moss_max_attempts))
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._client.request(method, url, **kwargs)
+            except httpx.TimeoutException as exc:
+                last = RetryableTTS("MOSI 请求超时")
+                self._pause(attempt, attempts, last)
+                continue
+            except httpx.TransportError as exc:
+                last = RetryableTTS(f"MOSI 请求失败：{exc}")
+                self._pause(attempt, attempts, last)
+                continue
+            if response.status_code == 429 or response.status_code >= 500:
+                last = RetryableTTS(
+                    f"MOSI 请求失败（{response.status_code}）：{response.text[:240]}",
+                    wait=_retry_after(response),
+                )
+                self._pause(attempt, attempts, last)
+                continue
+            return response
+        raise ProviderError(f"MOSI 请求失败，已试 {attempts} 次：{last}") from last
+
+    def _pause(self, attempt: int, attempts: int, error: RetryableTTS) -> None:
+        if attempt >= attempts:
+            return
+        wait = self.settings.moss_retry_wait_sec if error.wait is None else error.wait
+        wait = max(0.0, min(60.0, float(wait)))
+        if wait:
+            self._sleep(wait)
 
     def list_voices(self) -> list[Voice]:
         voices: list[Voice] = []
@@ -115,16 +156,23 @@ class MosiTTSProvider:
             params: dict[str, str | int] = {"limit": 100}
             if after:
                 params["after"] = after
-            response = self._client.get(f"{self._base()}/v1/audio/voices", headers=self._headers(False), params=params)
+            response = self._request(
+                "GET",
+                f"{self._base()}/v1/audio/voices",
+                headers=self._headers(False),
+                params=params,
+            )
             self._raise(response)
             payload = response.json()
             for item in payload.get("data") or []:
+                preview = item.get("preview_url") or item.get("sample_url") or item.get("demo_url") or ""
                 voices.append(
                     Voice(
                         id=str(item.get("id") or ""),
                         name=str(item.get("name") or item.get("id") or "未命名音色"),
                         description=str(item.get("description") or ""),
                         language=str(item.get("language") or ""),
+                        preview_url=str(preview or ""),
                     )
                 )
             if not payload.get("has_more"):
@@ -150,7 +198,8 @@ class MosiTTSProvider:
         }
         if self._use_async(text):
             payload["async"] = True
-        response = self._client.post(
+        response = self._request(
+            "POST",
             f"{self._base()}/v1/audio/speech/speakers",
             headers=self._headers(),
             json=payload,
@@ -211,7 +260,7 @@ class MosiTTSProvider:
         raise ProviderError(f"无法解析 MOSI 响应：{str(data)[:300]}")
 
     def _download(self, url: str) -> bytes:
-        response = self._client.get(url, headers=self._headers(False))
+        response = self._request("GET", url, headers=self._headers(False))
         self._raise(response)
         if not response.content:
             raise ProviderError("MOSI 音频地址没有内容")
@@ -219,7 +268,8 @@ class MosiTTSProvider:
 
     def _poll(self, task_id: str) -> bytes:
         for _ in range(90):
-            response = self._client.get(
+            response = self._request(
+                "GET",
                 f"{self._base()}/v1/audio/tasks/{task_id}",
                 headers=self._headers(False),
             )
@@ -240,5 +290,15 @@ class MosiTTSProvider:
                     delay = min(10.0, max(0.2, float(retry_after)))
             except (TypeError, ValueError):
                 delay = 2.0
-            time.sleep(delay)
+            self._sleep(delay)
         raise ProviderError("MOSI 任务超时")
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None

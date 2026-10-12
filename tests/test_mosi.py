@@ -89,12 +89,48 @@ def test_async_task_is_polled(tmp_path):
 
 
 def test_missing_key(tmp_path):
-    provider = MosiTTSProvider(_settings(moss_api_key=""))
+    provider = MosiTTSProvider(_settings(moss_api_key="", mosi_api_key=""))
     try:
-        with pytest.raises(ProviderError):
+        with pytest.raises(ProviderError, match="MOSI_API_KEY"):
             provider.synthesize_line(SynthRequest("a", "甲", "voice", "你好"), tmp_path / "ignored.wav")
     finally:
         provider.close()
+
+
+def test_mosi_api_key_is_accepted(tmp_path):
+    wav = _wav_bytes(tmp_path)
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, content=wav, headers={"content-type": "audio/wav"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = MosiTTSProvider(_settings(moss_api_key="", mosi_api_key="from-mosi"), client=client)
+    provider.synthesize_line(SynthRequest("a", "甲", "v", "你好"), tmp_path / "alias.wav")
+    provider.close()
+    assert captured["authorization"] == "Bearer from-mosi"
+
+
+def test_rate_limit_is_retried(tmp_path):
+    wav = _wav_bytes(tmp_path)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("/speakers"):
+            raise AssertionError(str(request.url))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "slow down"}})
+        return httpx.Response(200, content=wav, headers={"content-type": "audio/wav"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = MosiTTSProvider(_settings(), client=client, sleep=lambda _seconds: None)
+    dest = tmp_path / "retry.wav"
+    provider.synthesize_line(SynthRequest("a", "甲", "v", "再试一次"), dest)
+    provider.close()
+    assert calls["n"] == 2
+    assert dest.read_bytes() == wav
 
 
 def test_binary_audio_response(tmp_path):

@@ -11,6 +11,7 @@ class Novel(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
+    style: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -105,6 +106,7 @@ class Scene(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     prompt: Mapped[str] = mapped_column(Text, default="")
     image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     episode: Mapped[Episode] = relationship(back_populates="scenes")
 
@@ -118,6 +120,7 @@ class Job(Base):
         ForeignKey("episodes.id", ondelete="CASCADE"), nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String(20))
+    line_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(String(200), default="")

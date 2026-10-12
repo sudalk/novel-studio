@@ -7,6 +7,7 @@ class Voice:
     name: str
     description: str = ""
     language: str = ""
+    preview_url: str = ""
 
 
 # 来自 MOSI 文档音色列表示例，便于离线演示和手动填写。
